@@ -1,9 +1,14 @@
+const WARNING_SCORE_THRESHOLD = 76;
+const VOICE_SCORE_THRESHOLD = 72;
+const VOICE_MIN_GAP_MS = 8000;
+const VOICE_REPEAT_GAP_MS = 15000;
+const VOICE_STABLE_FRAMES = 4;
+const BLINK_INTERVAL_MS = 260;
+
 const state = {
   data: null,
   currentFrame: null,
   voiceEnabled: false,
-  lastSpokenText: "",
-  lastSpokenAt: 0,
   avatar: null,
   player: {
     isPlaying: false,
@@ -11,11 +16,15 @@ const state = {
     index: 0,
     fps: 10,
   },
+  voice: {
+    candidateIssueId: null,
+    stableCount: 0,
+    lastSpokenIssueId: null,
+    lastSpokenAt: 0,
+  },
 };
 
 const elements = {
-  headline: document.getElementById("headline"),
-  summary: document.getElementById("summary"),
   overlayFrame: document.getElementById("overlayFrame"),
   currentIssue: document.getElementById("currentIssue"),
   scoreValue: document.getElementById("scoreValue"),
@@ -24,6 +33,8 @@ const elements = {
   phaseLabel: document.getElementById("phaseLabel"),
   averageScore: document.getElementById("averageScore"),
   repCount: document.getElementById("repCount"),
+  thresholdValue: document.getElementById("thresholdValue"),
+  summaryText: document.getElementById("summaryText"),
   coachText: document.getElementById("coachText"),
   metricGrid: document.getElementById("metricGrid"),
   findingList: document.getElementById("findingList"),
@@ -38,17 +49,102 @@ const metricLabels = {
   shin_lean_deg: "Shin lean",
 };
 
-const rigColors = {
-  live: "#ff574d",
-  liveBone: "rgba(82, 223, 255, 0.86)",
-  ref: "rgba(255, 208, 79, 0.94)",
-  refBone: "rgba(255, 208, 79, 0.35)",
-  grid: "rgba(82, 223, 255, 0.12)",
-  text: "rgba(245, 246, 247, 0.92)",
+const avatarPalette = {
+  live: {
+    fill0: "rgba(255, 255, 255, 0.52)",
+    fill1: "rgba(255, 255, 255, 0.42)",
+    fill2: "rgba(255, 255, 255, 0.34)",
+    edge: "rgba(255, 255, 255, 0.22)",
+    specular: "rgba(255, 255, 255, 0.22)",
+    glow: "rgba(255, 255, 255, 0.08)",
+    hot0: "#ffb0a5",
+    hot1: "#ff5b4d",
+    hotEdge: "rgba(255, 228, 222, 0.54)",
+    hotGlow: "rgba(255, 87, 77, 0.28)",
+    joint: "rgba(255, 255, 255, 0.58)",
+  },
+  reference: {
+    fill0: "rgba(255, 255, 255, 0.18)",
+    fill1: "rgba(255, 255, 255, 0.13)",
+    fill2: "rgba(255, 255, 255, 0.08)",
+    edge: "rgba(255, 255, 255, 0.12)",
+    specular: "rgba(255, 255, 255, 0.08)",
+    glow: "rgba(255, 255, 255, 0.04)",
+    hot0: "rgba(255, 184, 176, 0.26)",
+    hot1: "rgba(255, 109, 96, 0.16)",
+    hotEdge: "rgba(255, 214, 175, 0.15)",
+    hotGlow: "rgba(255, 170, 100, 0.08)",
+    joint: "rgba(255, 255, 255, 0.22)",
+  },
 };
+
+const BODY_SEGMENTS = [
+  { a: "left_shoulder", b: "left_elbow", scale: 0.19 },
+  { a: "left_elbow", b: "left_wrist", scale: 0.15 },
+  { a: "right_shoulder", b: "right_elbow", scale: 0.19 },
+  { a: "right_elbow", b: "right_wrist", scale: 0.15 },
+  { a: "left_hip", b: "left_knee", scale: 0.24 },
+  { a: "left_knee", b: "left_ankle", scale: 0.18 },
+  { a: "right_hip", b: "right_knee", scale: 0.24 },
+  { a: "right_knee", b: "right_ankle", scale: 0.18 },
+  { a: "left_ankle", b: "left_foot_index", scale: 0.11 },
+  { a: "right_ankle", b: "right_foot_index", scale: 0.11 },
+  { a: "left_shoulder", b: "left_hip", scale: 0.18 },
+  { a: "right_shoulder", b: "right_hip", scale: 0.18 },
+];
 
 function fmt(value, digits = 1, suffix = "") {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function midpoint(a, b) {
+  return {
+    x: (a.x + b.x) * 0.5,
+    y: (a.y + b.y) * 0.5,
+    scale: (a.scale + b.scale) * 0.5,
+    depth: (a.depth + b.depth) * 0.5,
+  };
+}
+
+function lerpPoint(a, b, t) {
+  return {
+    x: mix(a.x, b.x, t),
+    y: mix(a.y, b.y, t),
+    scale: mix(a.scale, b.scale, t),
+    depth: mix(a.depth, b.depth, t),
+  };
+}
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function averagePoints(points) {
+  const valid = points.filter(Boolean);
+  if (!valid.length) return null;
+  return valid.reduce((acc, point) => ({
+    x: acc.x + point.x / valid.length,
+    y: acc.y + point.y / valid.length,
+    scale: acc.scale + point.scale / valid.length,
+    depth: acc.depth + point.depth / valid.length,
+  }), { x: 0, y: 0, scale: 0, depth: 0 });
+}
+
+function getLandmarkIndex(name) {
+  return state.data.landmark_index[name];
+}
+
+function getProjectedPoint(projected, name) {
+  const index = getLandmarkIndex(name);
+  return Number.isInteger(index) ? projected[index] : null;
 }
 
 function findNearestFrameIndex(timeSec) {
@@ -78,6 +174,7 @@ function getFramePath(index) {
 
 function buildTimeline() {
   elements.timeline.innerHTML = "";
+
   const base = document.createElement("div");
   base.className = "timeline-base";
   elements.timeline.appendChild(base);
@@ -171,8 +268,8 @@ function resizeAvatarCanvas() {
 }
 
 function transformPoint(rawPoint, angle, tilt) {
-  const x = -(rawPoint[0] || 0);
-  const y = -(rawPoint[1] || 0) + 0.2;
+  const x = rawPoint[0] || 0;
+  const y = (rawPoint[1] || 0) - 0.14;
   const z = rawPoint[2] || 0;
 
   const cosY = Math.cos(angle);
@@ -189,12 +286,11 @@ function transformPoint(rawPoint, angle, tilt) {
 }
 
 function projectPoint(point, width, height) {
-  const depth = 3.7;
   const cameraZ = 4.8;
-  const scale = depth / (cameraZ - point.z);
+  const scale = 3.8 / (cameraZ - point.z);
   return {
     x: width * 0.5 + point.x * width * 0.24 * scale,
-    y: height * 0.53 + point.y * height * 0.34 * scale,
+    y: height * 0.57 + point.y * height * 0.32 * scale,
     scale,
     depth: point.z,
   };
@@ -204,29 +300,29 @@ function drawBackdrop(ctx, width, height) {
   ctx.clearRect(0, 0, width, height);
 
   const bg = ctx.createLinearGradient(0, 0, 0, height);
-  bg.addColorStop(0, "rgba(8, 13, 18, 1)");
-  bg.addColorStop(1, "rgba(4, 6, 9, 1)");
+  bg.addColorStop(0, "rgba(9, 14, 18, 1)");
+  bg.addColorStop(1, "rgba(5, 7, 11, 1)");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, width, height);
 
-  const glow = ctx.createRadialGradient(width * 0.5, height * 0.18, 10, width * 0.5, height * 0.18, width * 0.42);
-  glow.addColorStop(0, "rgba(82, 223, 255, 0.18)");
-  glow.addColorStop(1, "rgba(82, 223, 255, 0)");
-  ctx.fillStyle = glow;
+  const halo = ctx.createRadialGradient(width * 0.5, height * 0.18, 10, width * 0.5, height * 0.18, width * 0.48);
+  halo.addColorStop(0, "rgba(82, 223, 255, 0.16)");
+  halo.addColorStop(1, "rgba(82, 223, 255, 0)");
+  ctx.fillStyle = halo;
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = rigColors.grid;
+  ctx.strokeStyle = "rgba(82, 223, 255, 0.09)";
   ctx.lineWidth = 1;
-  for (let i = 0; i <= 8; i += 1) {
-    const y = height * (0.15 + i * 0.09);
+  for (let i = 0; i <= 7; i += 1) {
+    const y = height * (0.16 + i * 0.1);
     ctx.beginPath();
-    ctx.moveTo(width * 0.05, y);
-    ctx.lineTo(width * 0.95, y);
+    ctx.moveTo(width * 0.08, y);
+    ctx.lineTo(width * 0.92, y);
     ctx.stroke();
   }
 
-  for (let i = 0; i <= 8; i += 1) {
-    const x = width * (0.14 + i * 0.09);
+  for (let i = 0; i <= 6; i += 1) {
+    const x = width * (0.14 + i * 0.12);
     ctx.beginPath();
     ctx.moveTo(x, height * 0.12);
     ctx.lineTo(x, height * 0.9);
@@ -234,88 +330,201 @@ function drawBackdrop(ctx, width, height) {
   }
 }
 
-function drawRig(ctx, landmarks, highlightedIndices, palette, width, height, angle, tilt) {
+function drawCapsule(ctx, start, end, width, palette, isHot = false) {
+  if (!start || !end) return;
+
+  const gradient = ctx.createLinearGradient(start.x, start.y, end.x, end.y);
+  if (isHot) {
+    gradient.addColorStop(0, palette.hot0);
+    gradient.addColorStop(1, palette.hot1);
+  } else {
+    gradient.addColorStop(0, palette.fill0);
+    gradient.addColorStop(0.5, palette.fill1);
+    gradient.addColorStop(1, palette.fill2);
+  }
+
+  ctx.save();
+  ctx.strokeStyle = gradient;
+  ctx.lineCap = "round";
+  ctx.lineWidth = width;
+  ctx.shadowBlur = isHot ? width * 0.45 : width * 0.28;
+  ctx.shadowColor = isHot ? palette.hotGlow : palette.glow;
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+
+  ctx.strokeStyle = isHot ? "rgba(255, 238, 234, 0.28)" : palette.specular;
+  ctx.lineWidth = Math.max(1.2, width * 0.18);
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+
+  ctx.fillStyle = isHot ? palette.hot1 : palette.joint;
+  ctx.beginPath();
+  ctx.arc(start.x, start.y, width * 0.32, 0, Math.PI * 2);
+  ctx.arc(end.x, end.y, width * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPolygon(ctx, points, palette, isHot = false) {
+  const valid = points.filter(Boolean);
+  if (valid.length < 3) return;
+
+  const minX = Math.min(...valid.map((point) => point.x));
+  const maxX = Math.max(...valid.map((point) => point.x));
+  const minY = Math.min(...valid.map((point) => point.y));
+  const maxY = Math.max(...valid.map((point) => point.y));
+
+  const gradient = ctx.createLinearGradient(minX, minY, maxX, maxY);
+  if (isHot) {
+    gradient.addColorStop(0, palette.hot0);
+    gradient.addColorStop(1, palette.hot1);
+  } else {
+    gradient.addColorStop(0, palette.fill0);
+    gradient.addColorStop(0.55, palette.fill1);
+    gradient.addColorStop(1, palette.fill2);
+  }
+
+  ctx.save();
+  ctx.fillStyle = gradient;
+  ctx.strokeStyle = isHot ? palette.hotEdge : palette.edge;
+  ctx.lineWidth = 1.5;
+  ctx.shadowBlur = isHot ? 18 : 10;
+  ctx.shadowColor = isHot ? palette.hotGlow : palette.glow;
+  ctx.beginPath();
+  ctx.moveTo(valid[0].x, valid[0].y);
+  for (let i = 1; i < valid.length; i += 1) {
+    ctx.lineTo(valid[i].x, valid[i].y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHead(ctx, headCenter, shoulderMid, radius, palette, isHot = false) {
+  if (!headCenter || !shoulderMid) return;
+
+  const headGradient = ctx.createLinearGradient(headCenter.x, headCenter.y - radius, headCenter.x, headCenter.y + radius);
+  if (isHot) {
+    headGradient.addColorStop(0, palette.hot0);
+    headGradient.addColorStop(1, palette.hot1);
+  } else {
+    headGradient.addColorStop(0, palette.fill0);
+    headGradient.addColorStop(0.55, palette.fill1);
+    headGradient.addColorStop(1, palette.fill2);
+  }
+
+  ctx.save();
+  ctx.fillStyle = headGradient;
+  ctx.strokeStyle = isHot ? palette.hotEdge : palette.edge;
+  ctx.lineWidth = 1.4;
+  ctx.shadowBlur = isHot ? 18 : 12;
+  ctx.shadowColor = isHot ? palette.hotGlow : palette.glow;
+  ctx.beginPath();
+  ctx.ellipse(headCenter.x, headCenter.y, radius * 0.82, radius, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.strokeStyle = palette.specular;
+  ctx.lineWidth = Math.max(1, radius * 0.12);
+  ctx.beginPath();
+  ctx.moveTo(headCenter.x, headCenter.y - radius * 0.55);
+  ctx.lineTo(headCenter.x, headCenter.y + radius * 0.28);
+  ctx.stroke();
+  ctx.restore();
+
+  drawCapsule(ctx, shoulderMid, { x: headCenter.x, y: headCenter.y + radius * 0.86 }, radius * 0.32, palette, isHot);
+}
+
+function isSegmentHot(highlightedIndices, ...names) {
+  return names.some((name) => highlightedIndices.has(getLandmarkIndex(name)));
+}
+
+function buildProjectedLandmarks(landmarks, width, height) {
+  const angle = 0.3;
+  const tilt = -0.18;
+  return landmarks.map((point) => projectPoint(transformPoint(point, angle, tilt), width, height));
+}
+
+function drawMannequin(ctx, landmarks, highlightedIndices, palette, width, height, isGhost = false) {
   if (!Array.isArray(landmarks) || !landmarks.length) return;
 
-  const projected = landmarks.map((point) => projectPoint(transformPoint(point, angle, tilt), width, height));
-  const bones = state.data.connections
-    .map(([aIndex, bIndex]) => ({ a: projected[aIndex], b: projected[bIndex] }))
-    .filter(({ a, b }) => a && b)
-    .sort((left, right) => ((left.a.depth + left.b.depth) * 0.5) - ((right.a.depth + right.b.depth) * 0.5));
+  const projected = buildProjectedLandmarks(landmarks, width, height);
+  const leftShoulder = getProjectedPoint(projected, "left_shoulder");
+  const rightShoulder = getProjectedPoint(projected, "right_shoulder");
+  const leftHip = getProjectedPoint(projected, "left_hip");
+  const rightHip = getProjectedPoint(projected, "right_hip");
+  const shoulderMid = averagePoints([leftShoulder, rightShoulder]);
+  const hipMid = averagePoints([leftHip, rightHip]);
+  if (!shoulderMid || !hipMid) return;
 
-  ctx.lineCap = "round";
-  bones.forEach(({ a, b }) => {
-    ctx.strokeStyle = palette.bone;
-    ctx.lineWidth = Math.max(1, ((a.scale + b.scale) * 0.5) * 5.5);
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.stroke();
+  const bodyScale = clamp(distance(leftShoulder, rightShoulder), width * 0.12, width * 0.21);
+  const blinkOn = !isGhost && state.avatar ? state.avatar.blinkVisible : true;
+  const leftChest = lerpPoint(leftShoulder, leftHip, 0.28);
+  const rightChest = lerpPoint(rightShoulder, rightHip, 0.28);
+  const leftWaist = lerpPoint(leftShoulder, leftHip, 0.72);
+  const rightWaist = lerpPoint(rightShoulder, rightHip, 0.72);
+  const sternum = lerpPoint(shoulderMid, hipMid, 0.34);
+  const pelvis = lerpPoint(shoulderMid, hipMid, 0.88);
+  const headAnchor = averagePoints([
+    getProjectedPoint(projected, "nose"),
+    getProjectedPoint(projected, "left_eye"),
+    getProjectedPoint(projected, "right_eye"),
+    getProjectedPoint(projected, "left_ear"),
+    getProjectedPoint(projected, "right_ear"),
+  ]) || {
+    x: shoulderMid.x,
+    y: shoulderMid.y - bodyScale * 1.08,
+    scale: shoulderMid.scale,
+    depth: shoulderMid.depth - 0.1,
+  };
+  const headRadius = bodyScale * 0.28;
+
+  ctx.save();
+  if (isGhost) {
+    ctx.globalAlpha = 0.82;
+  }
+
+  const torsoHot = blinkOn && isSegmentHot(highlightedIndices, "left_shoulder", "right_shoulder", "left_hip", "right_hip");
+  drawPolygon(ctx, [leftShoulder, rightShoulder, rightChest, leftChest], palette, torsoHot);
+  drawPolygon(ctx, [leftChest, rightChest, rightWaist, pelvis, leftWaist], palette, torsoHot);
+  drawPolygon(ctx, [leftWaist, rightWaist, rightHip, leftHip], palette, torsoHot);
+
+  BODY_SEGMENTS.forEach((segment) => {
+    const start = getProjectedPoint(projected, segment.a);
+    const end = getProjectedPoint(projected, segment.b);
+    const segmentHot = blinkOn && isSegmentHot(highlightedIndices, segment.a, segment.b);
+    drawCapsule(ctx, start, end, bodyScale * segment.scale, palette, segmentHot);
   });
 
-  projected
-    .map((point, index) => ({ point, index }))
-    .sort((left, right) => left.point.depth - right.point.depth)
-    .forEach(({ point, index }) => {
-      const radius = Math.max(2.2, point.scale * 7.2);
-      const isHighlighted = highlightedIndices.has(index);
-
-      ctx.fillStyle = isHighlighted ? palette.hot : palette.joint;
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, isHighlighted ? radius * 1.28 : radius, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (isHighlighted) {
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        ctx.arc(point.x, point.y, radius * 1.75, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    });
+  drawCapsule(ctx, shoulderMid, sternum, bodyScale * 0.14, palette, torsoHot);
+  drawHead(ctx, headAnchor, shoulderMid, headRadius, palette, torsoHot);
+  ctx.restore();
 }
 
 function renderAvatar() {
   if (!state.avatar) return;
 
   resizeAvatarCanvas();
-
   const { canvas, ctx } = state.avatar;
   const width = canvas.width;
   const height = canvas.height;
   if (!width || !height) return;
 
   drawBackdrop(ctx, width, height);
+  drawMannequin(ctx, state.avatar.referenceLandmarks, new Set(), avatarPalette.reference, width, height, true);
+  drawMannequin(ctx, state.avatar.wrongLandmarks, state.avatar.highlightedIndices, avatarPalette.live, width, height, false);
 
-  const baseAngle = state.avatar.angle;
-  const tilt = -0.22;
-  drawRig(ctx, state.avatar.referenceLandmarks, new Set(), {
-    joint: rigColors.ref,
-    bone: rigColors.refBone,
-    hot: rigColors.ref,
-  }, width, height, baseAngle - 0.07, tilt);
-  drawRig(ctx, state.avatar.wrongLandmarks, state.avatar.highlightedIndices, {
-    joint: rigColors.liveBone,
-    bone: "rgba(82, 223, 255, 0.92)",
-    hot: rigColors.live,
-  }, width, height, baseAngle + 0.03, tilt);
-
-  ctx.fillStyle = rigColors.text;
-  ctx.font = `${Math.max(12, Math.round(height * 0.036))}px "Space Grotesk", sans-serif`;
-  ctx.fillText("Perspective Skeleton", width * 0.05, height * 0.08);
+  ctx.fillStyle = "rgba(245, 246, 247, 0.92)";
+  ctx.font = `${Math.max(12, Math.round(height * 0.032))}px "Space Grotesk", sans-serif`;
+  ctx.fillText("Mannequin pose twin", width * 0.06, height * 0.08);
   ctx.fillStyle = "rgba(155, 167, 179, 0.92)";
-  ctx.font = `${Math.max(11, Math.round(height * 0.026))}px "Pretendard", sans-serif`;
-  ctx.fillText("wrong vs correct world landmarks", width * 0.05, height * 0.14);
-}
-
-function startAvatarLoop() {
-  const tick = () => {
-    if (!state.avatar) return;
-    state.avatar.angle += 0.006;
-    renderAvatar();
-    state.avatar.rafId = window.requestAnimationFrame(tick);
-  };
-  tick();
+  ctx.font = `${Math.max(11, Math.round(height * 0.024))}px "Pretendard", sans-serif`;
+  ctx.fillText("solid body = wrong, ghost body = correct", width * 0.06, height * 0.135);
 }
 
 function initAvatar() {
@@ -327,41 +536,73 @@ function initAvatar() {
     wrongLandmarks: null,
     referenceLandmarks: null,
     highlightedIndices: new Set(),
-    angle: 0.42,
-    rafId: null,
+    blinkVisible: true,
+    blinkTimerId: null,
   };
 
-  const resize = () => {
-    renderAvatar();
-  };
-  window.addEventListener("resize", resize);
+  window.addEventListener("resize", renderAvatar);
+  state.avatar.blinkTimerId = window.setInterval(() => {
+    if (!state.avatar) return;
+    state.avatar.blinkVisible = !state.avatar.blinkVisible;
+    if (state.avatar.highlightedIndices.size) {
+      renderAvatar();
+    }
+  }, BLINK_INTERVAL_MS);
   resizeAvatarCanvas();
   renderAvatar();
-  startAvatarLoop();
 }
 
-function maybeSpeak(text) {
-  if (!state.voiceEnabled || !text || !("speechSynthesis" in window)) return;
+function resetVoiceTracking() {
+  state.voice.candidateIssueId = null;
+  state.voice.stableCount = 0;
+}
+
+function maybeSpeak(frame, warningIssue) {
+  if (!state.voiceEnabled || !warningIssue || !("speechSynthesis" in window)) return;
+
+  if (frame.score > VOICE_SCORE_THRESHOLD) {
+    resetVoiceTracking();
+    return;
+  }
+
+  const issueId = warningIssue.id;
+  if (state.voice.candidateIssueId === issueId) {
+    state.voice.stableCount += 1;
+  } else {
+    state.voice.candidateIssueId = issueId;
+    state.voice.stableCount = 1;
+  }
+
+  if (state.voice.stableCount < VOICE_STABLE_FRAMES) return;
+  if (window.speechSynthesis.speaking) return;
+
   const now = Date.now();
-  if (state.lastSpokenText === text && now - state.lastSpokenAt < 4500) return;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
+  if (now - state.voice.lastSpokenAt < VOICE_MIN_GAP_MS) return;
+  if (state.voice.lastSpokenIssueId === issueId && now - state.voice.lastSpokenAt < VOICE_REPEAT_GAP_MS) return;
+
+  const utterance = new SpeechSynthesisUtterance(frame.coach_text);
   utterance.lang = "ko-KR";
-  utterance.rate = 1;
+  utterance.rate = 0.98;
   window.speechSynthesis.speak(utterance);
-  state.lastSpokenText = text;
-  state.lastSpokenAt = now;
+
+  state.voice.lastSpokenIssueId = issueId;
+  state.voice.lastSpokenAt = now;
+  state.voice.stableCount = 0;
 }
 
 function updateFrame(frame) {
   if (!frame) return;
   state.currentFrame = frame;
 
-  const issue = frame.issues[0];
-  elements.currentIssue.textContent = issue ? issue.label : "기준 자세와 거의 동일";
+  const topIssue = (frame.issues || [])[0] || null;
+  const warningIssue = topIssue && frame.score <= WARNING_SCORE_THRESHOLD ? topIssue : null;
+
+  elements.currentIssue.textContent = warningIssue ? warningIssue.label : "기준 자세 범위";
   elements.scoreValue.textContent = `${Math.round(frame.score)}`;
   elements.phaseLabel.textContent = `Rep ${frame.rep_index} · ${frame.phase}`;
-  elements.coachText.textContent = frame.coach_text;
+  elements.coachText.textContent = warningIssue
+    ? frame.coach_text
+    : "현재 프레임은 기준 스쿼트 범위 안에 있어 음성 안내를 쉬고 있습니다.";
 
   renderMetrics(frame);
 
@@ -371,11 +612,17 @@ function updateFrame(frame) {
     cursor.style.left = `${(frame.time_sec / duration) * 100}%`;
   }
 
-  const highlightedIndices = new Set(
-    (frame.highlighted_joint_names || [])
-      .map((name) => state.data.landmark_index[name] ?? state.data.landmark_index[`left_${name}`] ?? state.data.landmark_index[`right_${name}`])
-      .filter((value) => Number.isInteger(value)),
-  );
+  const highlightedIndices = warningIssue
+    ? new Set(
+        (frame.highlighted_joint_names || [])
+          .flatMap((name) => [
+            state.data.landmark_index[name],
+            state.data.landmark_index[`left_${name}`],
+            state.data.landmark_index[`right_${name}`],
+          ])
+          .filter((value) => Number.isInteger(value)),
+      )
+    : new Set();
 
   if (state.avatar) {
     state.avatar.wrongLandmarks = frame.wrong.world_landmarks;
@@ -384,18 +631,14 @@ function updateFrame(frame) {
     renderAvatar();
   }
 
-  maybeSpeak(frame.coach_text);
+  maybeSpeak(frame, warningIssue);
 }
 
-function showFrame(index, shouldSpeak = true) {
+function showFrame(index) {
   const clamped = Math.max(0, Math.min(index, state.data.frames.length - 1));
   state.player.index = clamped;
   elements.overlayFrame.src = getFramePath(clamped);
   updateFrame(state.data.frames[clamped]);
-  if (!shouldSpeak) {
-    state.lastSpokenText = "";
-    state.lastSpokenAt = 0;
-  }
 }
 
 function pause() {
@@ -424,7 +667,7 @@ function play() {
 
 function seekToTime(timeSec) {
   const index = findNearestFrameIndex(timeSec);
-  showFrame(index, false);
+  showFrame(index);
 }
 
 function bindControls() {
@@ -441,6 +684,7 @@ function bindControls() {
     elements.voiceToggle.textContent = state.voiceEnabled ? "음성 피드백 켬" : "음성 피드백 끔";
     if (!state.voiceEnabled && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
+      resetVoiceTracking();
     }
   });
 }
@@ -453,21 +697,22 @@ async function bootstrap() {
 
   state.data = await response.json();
   state.player.fps = state.data.input_videos.wrong.sampled_fps || 10;
+  const findingLabels = state.data.overview.top_findings.map((item) => item.label).join(" / ");
 
-  elements.headline.textContent = state.data.overview.headline;
-  elements.summary.textContent = state.data.overview.summary;
   elements.averageScore.textContent = `${Math.round(state.data.overview.average_score)}`;
   elements.repCount.textContent = `${state.data.overview.rep_count}`;
+  elements.thresholdValue.textContent = `${WARNING_SCORE_THRESHOLD}`;
+  elements.summaryText.textContent = `주요 이탈: ${findingLabels}.`;
 
   buildTimeline();
   renderFindings();
   initAvatar();
   bindControls();
-  showFrame(0, false);
+  showFrame(0);
 }
 
 bootstrap().catch((error) => {
   console.error(error);
-  elements.headline.textContent = "Prototype load failed";
-  elements.summary.textContent = error.message;
+  elements.summaryText.textContent = error.message;
+  elements.coachText.textContent = "프로토타입 로드에 실패했습니다.";
 });
