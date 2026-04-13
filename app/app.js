@@ -369,10 +369,75 @@ function buildJointAnchors(sequence, names) {
   return anchors;
 }
 
+function distanceBetweenLandmarks(landmarks, a, b) {
+  const pointA = getJointPoint(landmarks, a);
+  const pointB = getJointPoint(landmarks, b);
+  if (!pointA || !pointB) return null;
+  return Math.hypot(pointA[0] - pointB[0], pointA[1] - pointB[1]);
+}
+
+function buildAvatarLayout(sequence) {
+  const rootXs = [];
+  const groundYs = [];
+  const bodyHeights = [];
+  const shoulderSpans = [];
+  const hipSpans = [];
+  const upperArms = [];
+  const forearms = [];
+  const thighs = [];
+  const shins = [];
+
+  sequence.forEach((landmarks) => {
+    if (!landmarks) return;
+    const support = buildSupportInfo(landmarks);
+    const head = buildHeadInfo(landmarks);
+    const root = buildRootInfo(landmarks);
+
+    if (root) rootXs.push(root.x);
+    if (support) groundYs.push(support.groundY);
+    if (support && head) bodyHeights.push(support.groundY - head.y);
+
+    shoulderSpans.push(distanceBetweenLandmarks(landmarks, "left_shoulder", "right_shoulder"));
+    hipSpans.push(distanceBetweenLandmarks(landmarks, "left_hip", "right_hip"));
+    upperArms.push(distanceBetweenLandmarks(landmarks, "left_shoulder", "left_elbow"));
+    upperArms.push(distanceBetweenLandmarks(landmarks, "right_shoulder", "right_elbow"));
+    forearms.push(distanceBetweenLandmarks(landmarks, "left_elbow", "left_wrist"));
+    forearms.push(distanceBetweenLandmarks(landmarks, "right_elbow", "right_wrist"));
+    thighs.push(distanceBetweenLandmarks(landmarks, "left_hip", "left_knee"));
+    thighs.push(distanceBetweenLandmarks(landmarks, "right_hip", "right_knee"));
+    shins.push(distanceBetweenLandmarks(landmarks, "left_knee", "left_ankle"));
+    shins.push(distanceBetweenLandmarks(landmarks, "right_knee", "right_ankle"));
+  });
+
+  const bodyHeight = median(bodyHeights) || 1;
+  return {
+    centerX: median(rootXs) || 0,
+    groundY: median(groundYs) || 0,
+    bodyHeight,
+    shoulderSpan: median(shoulderSpans) || bodyHeight * 0.2,
+    hipSpan: median(hipSpans) || bodyHeight * 0.15,
+    upperArm: median(upperArms) || bodyHeight * 0.18,
+    forearm: median(forearms) || bodyHeight * 0.17,
+    thigh: median(thighs) || bodyHeight * 0.24,
+    shin: median(shins) || bodyHeight * 0.23,
+  };
+}
+
 function prepareAvatarTrack(roleKey) {
+  const inputKey = roleKey === "reference" ? "correct" : "wrong";
+  const videoMeta = state.data.input_videos[inputKey] || {};
+  const sourceWidth = videoMeta.width || 1080;
+  const sourceHeight = videoMeta.height || 1920;
+
   const sequence = state.data.frames.map((frame) => {
-    const landmarks = frame?.[roleKey]?.world_landmarks;
-    return Array.isArray(landmarks) && landmarks.length ? cloneLandmarks(landmarks) : null;
+    const landmarks = frame?.[roleKey]?.landmarks2d;
+    if (!Array.isArray(landmarks) || !landmarks.length) return null;
+    return landmarks.map((point) => [
+      (point[0] ?? 0) * sourceWidth,
+      (point[1] ?? 0) * sourceHeight,
+      (point[2] ?? 0) * sourceWidth,
+      point[3] ?? 1,
+    ]);
   });
 
   const jointIndices = SUPPORT_JOINT_NAMES.map(getLandmarkIndex).filter(Number.isInteger);
@@ -442,7 +507,10 @@ function prepareAvatarTrack(roleKey) {
 
   const supportLocked = smoothSequence(footLocked, 0.12, jointIndices);
   const finalTrack = smoothSequence(supportLocked, 0.48);
-  return finalTrack;
+  return {
+    frames: finalTrack,
+    layout: buildAvatarLayout(finalTrack),
+  };
 }
 
 function buildTimeline() {
@@ -607,13 +675,46 @@ function normalizeProjectedPoints(projected, width, height) {
   }));
 }
 
-function buildProjectedFrame(landmarks, width, height) {
+function fitLimbChain(start, middle, end, upperTarget, lowerTarget, fallbackDir) {
+  if (!start) {
+    return { middle, end };
+  }
+
+  const upperDirection = middle
+    ? vecNormalize(vecSub(middle, start), fallbackDir)
+    : end
+      ? vecNormalize(vecSub(end, start), fallbackDir)
+      : fallbackDir;
+  const rawUpper = middle ? vecLength(vecSub(middle, start)) : upperTarget;
+  const fittedUpper = clamp(rawUpper || upperTarget, upperTarget * 0.92, upperTarget * 1.16);
+  const fittedMiddle = vecAdd(start, vecScale(upperDirection, fittedUpper));
+
+  const lowerDirection = end
+    ? vecNormalize(vecSub(end, middle || fittedMiddle), upperDirection)
+    : upperDirection;
+  const rawLower = end && middle ? vecLength(vecSub(end, middle)) : lowerTarget;
+  const fittedLower = clamp(rawLower || lowerTarget, lowerTarget * 0.92, lowerTarget * 1.18);
+  const fittedEnd = vecAdd(fittedMiddle, vecScale(lowerDirection, fittedLower));
+
+  return {
+    middle: fittedMiddle,
+    end: fittedEnd,
+  };
+}
+
+function buildProjectedFrame(landmarks, width, height, layout) {
   if (!Array.isArray(landmarks) || !landmarks.length) return null;
-  const projected = normalizeProjectedPoints(
-    landmarks.map((point) => projectPoint(transformPoint(point), width, height)),
-    width,
-    height,
-  );
+  const targetHeight = height * 0.62;
+  const targetGroundY = height * 0.85;
+  const targetCenterX = width * 0.5;
+  const scale = clamp(targetHeight / Math.max(layout?.bodyHeight || 1, 1), 0.22, 0.48);
+  const centerX = layout?.centerX ?? 0;
+  const groundY = layout?.groundY ?? 0;
+
+  const projected = landmarks.map((point) => ({
+    x: (point[0] - centerX) * scale + targetCenterX,
+    y: (point[1] - groundY) * scale + targetGroundY,
+  }));
 
   const pick = (name) => {
     const index = getLandmarkIndex(name);
@@ -654,16 +755,20 @@ function buildProjectedFrame(landmarks, width, height) {
     lateralAxis = vecNormalize(vecPerp(torsoAxis), { x: 1, y: 0 });
   }
 
-  const bodyHeight = clamp(
-    supportMid.y - ((faceMid && faceMid.y) || shoulderMid.y - height * 0.08),
-    height * 0.54,
-    height * 0.76,
-  );
-  const headUnit = clamp(bodyHeight / 8.4, height * 0.035, height * 0.08);
+  const bodyHeight = clamp((layout?.bodyHeight || 1) * scale, height * 0.5, height * 0.66);
+  const headUnit = clamp(bodyHeight / 8.2, height * 0.03, height * 0.06);
   const measuredShoulderHalf = vecLength(vecSub(rightShoulder || shoulderMid, leftShoulder || shoulderMid)) * 0.5;
   const measuredHipHalf = vecLength(vecSub(rightHip || hipMid, leftHip || hipMid)) * 0.5;
-  const shoulderHalf = clamp(measuredShoulderHalf * 0.94, headUnit * 0.64, headUnit * 1.16);
-  const hipHalf = clamp(measuredHipHalf * 0.98, headUnit * 0.4, headUnit * 0.88);
+  const shoulderHalf = clamp(
+    Math.max(measuredShoulderHalf, ((layout?.shoulderSpan || 0) * scale) * 0.5) * 1.03,
+    headUnit * 0.78,
+    headUnit * 1.2,
+  );
+  const hipHalf = clamp(
+    Math.max(measuredHipHalf, ((layout?.hipSpan || 0) * scale) * 0.5) * 1.01,
+    headUnit * 0.52,
+    headUnit * 0.9,
+  );
 
   const torso = {
     leftShoulder: vecAdd(shoulderMid, vecScale(lateralAxis, -shoulderHalf)),
@@ -677,7 +782,24 @@ function buildProjectedFrame(landmarks, width, height) {
   torso.waistRight = vecLerp(torso.rightShoulder, torso.rightHip, 0.72);
   torso.neck = shoulderMid;
   torso.sternum = vecLerp(shoulderMid, hipMid, 0.28);
-  torso.headCenter = faceMid ? vecAdd(faceMid, vecScale(torsoAxis, -headUnit * 0.06)) : vecAdd(shoulderMid, vecScale(torsoAxis, -headUnit * 1.0));
+  torso.headCenter = faceMid ? vecAdd(faceMid, vecScale(torsoAxis, -headUnit * 0.04)) : vecAdd(shoulderMid, vecScale(torsoAxis, -headUnit * 0.96));
+
+  const leftArm = fitLimbChain(
+    torso.leftShoulder,
+    leftElbow,
+    leftWrist,
+    Math.max((layout?.upperArm || 0) * scale, headUnit * 1.45),
+    Math.max((layout?.forearm || 0) * scale, headUnit * 1.42),
+    vecNormalize(vecAdd(vecScale(lateralAxis, -1), vecScale(torsoAxis, 0.2)), { x: -1, y: 0 }),
+  );
+  const rightArm = fitLimbChain(
+    torso.rightShoulder,
+    rightElbow,
+    rightWrist,
+    Math.max((layout?.upperArm || 0) * scale, headUnit * 1.45),
+    Math.max((layout?.forearm || 0) * scale, headUnit * 1.42),
+    vecNormalize(vecAdd(vecScale(lateralAxis, 1), vecScale(torsoAxis, 0.2)), { x: 1, y: 0 }),
+  );
 
   return {
     headUnit,
@@ -686,10 +808,10 @@ function buildProjectedFrame(landmarks, width, height) {
     joints: {
       leftShoulder: torso.leftShoulder,
       rightShoulder: torso.rightShoulder,
-      leftElbow,
-      rightElbow,
-      leftWrist,
-      rightWrist,
+      leftElbow: leftArm.middle,
+      rightElbow: rightArm.middle,
+      leftWrist: leftArm.end,
+      rightWrist: rightArm.end,
       leftHip: torso.leftHip,
       rightHip: torso.rightHip,
       leftKnee,
@@ -858,8 +980,18 @@ function renderAvatar() {
 
   drawBackdrop(ctx, width, height);
 
-  const referenceFrame = buildProjectedFrame(state.avatar.referenceLandmarks, width, height);
-  const wrongFrame = buildProjectedFrame(state.avatar.wrongLandmarks, width, height);
+  const referenceFrame = buildProjectedFrame(
+    state.avatar.referenceLandmarks,
+    width,
+    height,
+    state.avatar.tracks.reference.layout,
+  );
+  const wrongFrame = buildProjectedFrame(
+    state.avatar.wrongLandmarks,
+    width,
+    height,
+    state.avatar.tracks.wrong.layout,
+  );
 
   drawAdultFigure(ctx, referenceFrame, new Set(), avatarPalette.reference, true);
   drawAdultFigure(ctx, wrongFrame, state.avatar.hotNames || new Set(), avatarPalette.live, false);
@@ -959,8 +1091,10 @@ function updateFrame(frame) {
 
   const hotNames = warningIssue ? getHotJointNames(warningIssue.id) : new Set();
   if (state.avatar) {
-    state.avatar.wrongLandmarks = state.avatar.tracks.wrong[currentIndex] || frame.wrong.world_landmarks;
-    state.avatar.referenceLandmarks = state.avatar.tracks.reference[currentIndex] || frame.reference.world_landmarks;
+    state.avatar.wrongLandmarks =
+      state.avatar.tracks.wrong.frames[currentIndex] || frame.wrong.landmarks2d;
+    state.avatar.referenceLandmarks =
+      state.avatar.tracks.reference.frames[currentIndex] || frame.reference.landmarks2d;
     state.avatar.hotNames = hotNames;
     renderAvatar();
   }
