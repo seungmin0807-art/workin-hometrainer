@@ -12,61 +12,57 @@
 </head>
 <body>
   <main class="shell">
-    <section class="stage-grid">
-      <article class="stage-card">
-        <div class="card-head">
-          <div>
-            <p class="eyebrow">Overlay Video</p>
-            <h1>Wrong squat with landmarks</h1>
-          </div>
-          <div class="score-pill">
-            <span>Pose score</span>
-            <strong id="scoreValue">--</strong>
-          </div>
+    <article class="column video-column">
+      <header class="column-head">
+        <div>
+          <p class="eyebrow">Overlay Video</p>
+          <h1>Wrong squat overlay</h1>
         </div>
+        <div class="score-pill">
+          <span>1s avg score</span>
+          <strong id="scoreValue">--</strong>
+        </div>
+      </header>
 
-        <div class="video-stage">
-          <img id="overlayFrame" alt="Squat overlay frame">
-          <div class="video-overlay">
-            <div class="video-badge">
-              <span class="badge-label">Current cue</span>
-              <strong id="currentIssue">기준 자세 범위</strong>
-            </div>
+      <div class="video-stage">
+        <img id="overlayFrame" alt="Squat overlay frame">
+        <div class="video-overlay">
+          <div class="video-badge">
+            <span class="badge-label">Current cue</span>
+            <strong id="currentIssue">기준 자세 범위</strong>
           </div>
         </div>
+      </div>
 
-        <div class="controls">
-          <button id="playToggle" class="action">재생</button>
-          <button id="voiceToggle" class="ghost">음성 피드백 끔</button>
-          <span id="phaseLabel" class="phase-label">Rep 1 · steady</span>
+      <div class="controls">
+        <button id="playToggle" class="action">재생</button>
+        <button id="voiceToggle" class="ghost">음성 피드백 끔</button>
+        <span id="phaseLabel" class="phase-label">Rep 1 · steady</span>
+      </div>
+    </article>
+
+    <article class="column avatar-column">
+      <header class="column-head">
+        <div>
+          <p class="eyebrow">Pose Avatar</p>
+          <h2>Adult mannequin twin</h2>
         </div>
-      </article>
+        <p class="legend">
+          <span class="legend-dot live"></span> wrong
+          <span class="legend-dot ref"></span> correct
+        </p>
+      </header>
 
-      <article class="stage-card">
-        <div class="card-head">
-          <div>
-            <p class="eyebrow">Pose Avatar</p>
-            <h2>Mannequin motion twin</h2>
-          </div>
-          <p class="legend">
-            <span class="legend-dot live"></span> wrong
-            <span class="legend-dot ref"></span> correct
-          </p>
+      <div id="avatarViewport" class="avatar-viewport"></div>
+    </article>
+
+    <article class="column info-column">
+      <section class="info-block overview-block">
+        <div class="info-head">
+          <span class="panel-kicker">Overview</span>
+          <h3>Session summary</h3>
         </div>
-
-        <div id="avatarViewport" class="avatar-viewport"></div>
-      </article>
-    </section>
-
-    <section class="analysis-grid">
-      <article class="panel summary-panel">
-        <div class="panel-head">
-          <div>
-            <span class="panel-kicker">Overview</span>
-            <h3>Single-camera squat analysis</h3>
-          </div>
-        </div>
-        <div class="top-metrics">
+        <div class="overview-metrics">
           <div>
             <span>Average</span>
             <strong id="averageScore">--</strong>
@@ -81,50 +77,42 @@
           </div>
         </div>
         <p id="summaryText" class="summary-copy">분석 데이터를 불러오는 중입니다.</p>
-      </article>
+      </section>
 
-      <article class="panel coach-panel">
-        <div class="panel-head">
-          <div>
-            <span class="panel-kicker">Live coaching</span>
-            <h3>Current frame note</h3>
-          </div>
+      <section class="info-block coach-block">
+        <div class="info-head">
+          <span class="panel-kicker">Live coaching</span>
+          <h3>Current note</h3>
         </div>
         <p id="coachText" class="coach-copy">분석 결과를 준비 중입니다.</p>
-      </article>
+      </section>
 
-      <article class="panel metrics-panel">
-        <div class="panel-head">
-          <div>
-            <span class="panel-kicker">Comparison</span>
-            <h3>Current frame metrics</h3>
-          </div>
+      <section class="info-block metrics-block">
+        <div class="info-head">
+          <span class="panel-kicker">Comparison</span>
+          <h3>Current metrics</h3>
         </div>
         <div id="metricGrid" class="metric-grid"></div>
-      </article>
+      </section>
 
-      <article class="panel findings-panel">
-        <div class="panel-head">
-          <div>
-            <span class="panel-kicker">Top findings</span>
-            <h3>Where the squat drifts</h3>
-          </div>
+      <section class="info-block findings-block">
+        <div class="info-head">
+          <span class="panel-kicker">Top findings</span>
+          <h3>Most common drifts</h3>
         </div>
         <div id="findingList" class="finding-list"></div>
-      </article>
+      </section>
 
-      <article class="panel timeline-panel">
-        <div class="panel-head">
-          <div>
-            <span class="panel-kicker">Timeline</span>
-            <h3>Issue segments across the set</h3>
-          </div>
+      <section class="info-block timeline-block">
+        <div class="info-head">
+          <span class="panel-kicker">Timeline</span>
+          <h3>Issue segments</h3>
         </div>
         <div id="timeline" class="timeline" aria-label="Issue timeline"></div>
-      </article>
-    </section>
+      </section>
+    </article>
   </main>
 
-  <script src="app.js?v=20260413-4"></script>
+  <script src="app.js?v=20260413-5"></script>
 </body>
 </html>

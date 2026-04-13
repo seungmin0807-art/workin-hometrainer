@@ -3,10 +3,11 @@ const VOICE_SCORE_THRESHOLD = 72;
 const VOICE_MIN_GAP_MS = 8000;
 const VOICE_REPEAT_GAP_MS = 15000;
 const VOICE_STABLE_FRAMES = 4;
-const BLINK_INTERVAL_MS = 260;
+const BLINK_INTERVAL_MS = 280;
 
 const state = {
   data: null,
+  scoreBuckets: new Map(),
   currentFrame: null,
   voiceEnabled: false,
   avatar: null,
@@ -49,49 +50,39 @@ const metricLabels = {
   shin_lean_deg: "Shin lean",
 };
 
-const avatarPalette = {
-  live: {
-    fill0: "rgba(255, 255, 255, 0.52)",
-    fill1: "rgba(255, 255, 255, 0.42)",
-    fill2: "rgba(255, 255, 255, 0.34)",
-    edge: "rgba(255, 255, 255, 0.22)",
-    specular: "rgba(255, 255, 255, 0.22)",
-    glow: "rgba(255, 255, 255, 0.08)",
-    hot0: "#ffb0a5",
-    hot1: "#ff5b4d",
-    hotEdge: "rgba(255, 228, 222, 0.54)",
-    hotGlow: "rgba(255, 87, 77, 0.28)",
-    joint: "rgba(255, 255, 255, 0.58)",
-  },
-  reference: {
-    fill0: "rgba(255, 255, 255, 0.18)",
-    fill1: "rgba(255, 255, 255, 0.13)",
-    fill2: "rgba(255, 255, 255, 0.08)",
-    edge: "rgba(255, 255, 255, 0.12)",
-    specular: "rgba(255, 255, 255, 0.08)",
-    glow: "rgba(255, 255, 255, 0.04)",
-    hot0: "rgba(255, 184, 176, 0.26)",
-    hot1: "rgba(255, 109, 96, 0.16)",
-    hotEdge: "rgba(255, 214, 175, 0.15)",
-    hotGlow: "rgba(255, 170, 100, 0.08)",
-    joint: "rgba(255, 255, 255, 0.22)",
-  },
+const ISSUE_HOT_NAMES = {
+  knee_flexion: (side) => [`${side}_hip`, `${side}_knee`, `${side}_ankle`],
+  shin_lean: (side) => [`${side}_knee`, `${side}_ankle`, `${side}_heel`, `${side}_foot_index`],
+  torso_lean: (side) => [`${side}_shoulder`, `${side}_hip`],
+  depth: () => ["left_hip", "right_hip", "left_knee", "right_knee"],
 };
 
-const BODY_SEGMENTS = [
-  { a: "left_shoulder", b: "left_elbow", scale: 0.19 },
-  { a: "left_elbow", b: "left_wrist", scale: 0.15 },
-  { a: "right_shoulder", b: "right_elbow", scale: 0.19 },
-  { a: "right_elbow", b: "right_wrist", scale: 0.15 },
-  { a: "left_hip", b: "left_knee", scale: 0.24 },
-  { a: "left_knee", b: "left_ankle", scale: 0.18 },
-  { a: "right_hip", b: "right_knee", scale: 0.24 },
-  { a: "right_knee", b: "right_ankle", scale: 0.18 },
-  { a: "left_ankle", b: "left_foot_index", scale: 0.11 },
-  { a: "right_ankle", b: "right_foot_index", scale: 0.11 },
-  { a: "left_shoulder", b: "left_hip", scale: 0.18 },
-  { a: "right_shoulder", b: "right_hip", scale: 0.18 },
-];
+const avatarPalette = {
+  live: {
+    fill0: "rgba(255, 255, 255, 0.42)",
+    fill1: "rgba(255, 255, 255, 0.34)",
+    fill2: "rgba(255, 255, 255, 0.28)",
+    edge: "rgba(255, 255, 255, 0.18)",
+    glow: "rgba(255, 255, 255, 0.08)",
+    joint: "rgba(255, 255, 255, 0.48)",
+    hot0: "rgba(255, 160, 148, 0.92)",
+    hot1: "rgba(255, 88, 76, 0.96)",
+    hotEdge: "rgba(255, 226, 222, 0.52)",
+    hotGlow: "rgba(255, 87, 77, 0.28)",
+  },
+  reference: {
+    fill0: "rgba(92, 206, 255, 0.28)",
+    fill1: "rgba(82, 176, 255, 0.22)",
+    fill2: "rgba(52, 120, 255, 0.16)",
+    edge: "rgba(118, 204, 255, 0.24)",
+    glow: "rgba(82, 223, 255, 0.14)",
+    joint: "rgba(164, 231, 255, 0.26)",
+    hot0: "rgba(92, 206, 255, 0.28)",
+    hot1: "rgba(52, 120, 255, 0.22)",
+    hotEdge: "rgba(118, 204, 255, 0.24)",
+    hotGlow: "rgba(82, 223, 255, 0.14)",
+  },
+};
 
 function fmt(value, digits = 1, suffix = "") {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
@@ -101,50 +92,64 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-function mix(a, b, t) {
-  return a + (b - a) * t;
+function vecAdd(a, b) {
+  return { x: a.x + b.x, y: a.y + b.y };
 }
 
-function midpoint(a, b) {
+function vecSub(a, b) {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+
+function vecScale(v, scale) {
+  return { x: v.x * scale, y: v.y * scale };
+}
+
+function vecLength(v) {
+  return Math.hypot(v.x, v.y);
+}
+
+function vecNormalize(v, fallback = { x: 0, y: 1 }) {
+  const length = vecLength(v);
+  if (length < 1e-4) return fallback;
+  return { x: v.x / length, y: v.y / length };
+}
+
+function vecPerp(v) {
+  return { x: -v.y, y: v.x };
+}
+
+function vecDot(a, b) {
+  return a.x * b.x + a.y * b.y;
+}
+
+function vecLerp(a, b, t) {
   return {
-    x: (a.x + b.x) * 0.5,
-    y: (a.y + b.y) * 0.5,
-    scale: (a.scale + b.scale) * 0.5,
-    depth: (a.depth + b.depth) * 0.5,
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
   };
-}
-
-function lerpPoint(a, b, t) {
-  return {
-    x: mix(a.x, b.x, t),
-    y: mix(a.y, b.y, t),
-    scale: mix(a.scale, b.scale, t),
-    depth: mix(a.depth, b.depth, t),
-  };
-}
-
-function distance(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function averagePoints(points) {
   const valid = points.filter(Boolean);
   if (!valid.length) return null;
-  return valid.reduce((acc, point) => ({
-    x: acc.x + point.x / valid.length,
-    y: acc.y + point.y / valid.length,
-    scale: acc.scale + point.scale / valid.length,
-    depth: acc.depth + point.depth / valid.length,
-  }), { x: 0, y: 0, scale: 0, depth: 0 });
+  const total = valid.reduce((acc, point) => ({
+    x: acc.x + point.x,
+    y: acc.y + point.y,
+  }), { x: 0, y: 0 });
+  return {
+    x: total.x / valid.length,
+    y: total.y / valid.length,
+  };
 }
 
 function getLandmarkIndex(name) {
   return state.data.landmark_index[name];
 }
 
-function getProjectedPoint(projected, name) {
-  const index = getLandmarkIndex(name);
-  return Number.isInteger(index) ? projected[index] : null;
+function getFramePath(index) {
+  const media = state.data.media;
+  const padded = String(index).padStart(4, "0");
+  return `${media.overlay_frame_dir}/${media.overlay_frame_pattern.replace("{index:04d}", padded)}`;
 }
 
 function findNearestFrameIndex(timeSec) {
@@ -166,10 +171,30 @@ function findNearestFrameIndex(timeSec) {
   return Math.abs(frames[a].time_sec - timeSec) <= Math.abs(frames[b].time_sec - timeSec) ? a : b;
 }
 
-function getFramePath(index) {
-  const media = state.data.media;
-  const padded = String(index).padStart(4, "0");
-  return `${media.overlay_frame_dir}/${media.overlay_frame_pattern.replace("{index:04d}", padded)}`;
+function buildScoreBuckets(frames) {
+  const buckets = new Map();
+  frames.forEach((frame) => {
+    const second = Math.floor(frame.time_sec);
+    const current = buckets.get(second) || { sum: 0, count: 0 };
+    current.sum += frame.score;
+    current.count += 1;
+    buckets.set(second, current);
+  });
+  buckets.forEach((bucket, second) => {
+    buckets.set(second, { ...bucket, avg: bucket.sum / bucket.count });
+  });
+  return buckets;
+}
+
+function getDisplayedScore(frame) {
+  const bucket = state.scoreBuckets.get(Math.floor(frame.time_sec));
+  return bucket ? bucket.avg : frame.score;
+}
+
+function getHotJointNames(issueId) {
+  const primarySide = state.data.input_videos.wrong.primary_side || "left";
+  const resolver = ISSUE_HOT_NAMES[issueId];
+  return new Set(resolver ? resolver(primarySide) : []);
 }
 
 function buildTimeline() {
@@ -211,7 +236,7 @@ function renderFindings() {
     const suffix = item.id === "depth" ? "" : "°";
     node.innerHTML = `
       <strong>${item.label}</strong>
-      <p>평균 이탈 ${fmt(item.avg_delta, 1, suffix)} · 최대 ${fmt(item.peak_delta, 1, suffix)} · ${item.frame_hits} sampled frames</p>
+      <p>${fmt(item.avg_delta, 1, suffix)} avg · ${fmt(item.peak_delta, 1, suffix)} peak</p>
     `;
     node.addEventListener("click", () => {
       if (segment) {
@@ -235,14 +260,12 @@ function renderMetrics(frame) {
 
   elements.metricGrid.innerHTML = "";
   rows.forEach(([key, suffix]) => {
-    const wrongValue = wrongMetrics?.[key];
-    const refValue = refMetrics?.[key];
     const node = document.createElement("article");
     node.className = "metric-card";
     node.innerHTML = `
       <span>${metricLabels[key]}</span>
-      <strong>${fmt(wrongValue, 1, suffix)}</strong>
-      <em>ref ${fmt(refValue, 1, suffix)}</em>
+      <strong>${fmt(wrongMetrics?.[key], 1, suffix)}</strong>
+      <em>ref ${fmt(refMetrics?.[key], 1, suffix)}</em>
     `;
     elements.metricGrid.appendChild(node);
   });
@@ -267,13 +290,16 @@ function resizeAvatarCanvas() {
   }
 }
 
-function transformPoint(rawPoint, angle, tilt) {
+function transformPoint(rawPoint) {
   const x = rawPoint[0] || 0;
-  const y = (rawPoint[1] || 0) - 0.14;
+  const y = (rawPoint[1] || 0) - 0.18;
   const z = rawPoint[2] || 0;
 
-  const cosY = Math.cos(angle);
-  const sinY = Math.sin(angle);
+  const yaw = 0.18;
+  const tilt = -0.12;
+
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
   const x1 = x * cosY - z * sinY;
   const z1 = x * sinY + z * cosY;
 
@@ -286,51 +312,152 @@ function transformPoint(rawPoint, angle, tilt) {
 }
 
 function projectPoint(point, width, height) {
-  const cameraZ = 4.8;
-  const scale = 3.8 / (cameraZ - point.z);
+  const cameraZ = 5.2;
+  const scale = 4.1 / (cameraZ - point.z);
   return {
-    x: width * 0.5 + point.x * width * 0.24 * scale,
-    y: height * 0.57 + point.y * height * 0.32 * scale,
-    scale,
+    x: width * 0.5 + point.x * width * 0.17 * scale,
+    y: height * 0.49 + point.y * height * 0.23 * scale,
     depth: point.z,
   };
+}
+
+function buildProjectedLandmarks(landmarks, width, height) {
+  if (!Array.isArray(landmarks) || !landmarks.length) return null;
+  return landmarks.map((point) => projectPoint(transformPoint(point), width, height));
+}
+
+function getProjectedPoint(projected, name) {
+  const index = getLandmarkIndex(name);
+  return Number.isInteger(index) ? projected[index] : null;
+}
+
+function buildAdultRig(landmarks, width, height) {
+  const projected = buildProjectedLandmarks(landmarks, width, height);
+  if (!projected) return null;
+
+  const leftShoulderRaw = getProjectedPoint(projected, "left_shoulder");
+  const rightShoulderRaw = getProjectedPoint(projected, "right_shoulder");
+  const leftHipRaw = getProjectedPoint(projected, "left_hip");
+  const rightHipRaw = getProjectedPoint(projected, "right_hip");
+  const shoulderMidRaw = averagePoints([leftShoulderRaw, rightShoulderRaw]);
+  const hipMidRaw = averagePoints([leftHipRaw, rightHipRaw]);
+  const ankleMidRaw = averagePoints([getProjectedPoint(projected, "left_ankle"), getProjectedPoint(projected, "right_ankle")]);
+  const faceMidRaw = averagePoints([
+    getProjectedPoint(projected, "nose"),
+    getProjectedPoint(projected, "left_eye"),
+    getProjectedPoint(projected, "right_eye"),
+    getProjectedPoint(projected, "left_ear"),
+    getProjectedPoint(projected, "right_ear"),
+  ]);
+
+  if (!shoulderMidRaw || !hipMidRaw || !ankleMidRaw) return null;
+
+  const torsoAxis = vecNormalize(vecSub(hipMidRaw, shoulderMidRaw), { x: 0, y: 1 });
+  let lateralAxis = vecNormalize(vecSub(rightShoulderRaw || shoulderMidRaw, leftShoulderRaw || shoulderMidRaw), vecPerp(torsoAxis));
+  if (Math.abs(vecDot(torsoAxis, lateralAxis)) > 0.45) {
+    lateralAxis = vecNormalize(vecPerp(torsoAxis), { x: 1, y: 0 });
+  }
+
+  const rawHeight = clamp(
+    ankleMidRaw.y - ((faceMidRaw && faceMidRaw.y) || shoulderMidRaw.y - height * 0.08),
+    height * 0.42,
+    height * 0.82,
+  );
+  const headUnit = rawHeight / 8;
+
+  const rig = {
+    headUnit,
+    neck: shoulderMidRaw,
+    pelvis: vecAdd(shoulderMidRaw, vecScale(torsoAxis, headUnit * 2.55)),
+  };
+
+  rig.leftShoulder = vecAdd(rig.neck, vecScale(lateralAxis, -headUnit * 0.92));
+  rig.rightShoulder = vecAdd(rig.neck, vecScale(lateralAxis, headUnit * 0.92));
+  rig.leftHip = vecAdd(rig.pelvis, vecScale(lateralAxis, -headUnit * 0.58));
+  rig.rightHip = vecAdd(rig.pelvis, vecScale(lateralAxis, headUnit * 0.58));
+  rig.sternum = vecAdd(rig.neck, vecScale(torsoAxis, headUnit * 0.76));
+  rig.waist = vecAdd(rig.neck, vecScale(torsoAxis, headUnit * 1.78));
+  rig.headCenter = vecAdd(rig.neck, vecScale(torsoAxis, -headUnit * 1.02));
+
+  const lengths = {
+    upperArm: headUnit * 1.45,
+    forearm: headUnit * 1.38,
+    thigh: headUnit * 1.95,
+    shin: headUnit * 2.02,
+    foot: headUnit * 0.86,
+  };
+
+  function point(name) {
+    return getProjectedPoint(projected, name);
+  }
+
+  function direction(fromName, toName, fallback) {
+    const from = point(fromName);
+    const to = point(toName);
+    if (!from || !to) return fallback;
+    return vecNormalize(vecSub(to, from), fallback);
+  }
+
+  const leftUpperArmDir = direction("left_shoulder", "left_elbow", vecNormalize(vecAdd(vecScale(lateralAxis, -1), vecScale(torsoAxis, 0.12))));
+  const rightUpperArmDir = direction("right_shoulder", "right_elbow", vecNormalize(vecAdd(vecScale(lateralAxis, 1), vecScale(torsoAxis, 0.12))));
+  const leftForearmDir = direction("left_elbow", "left_wrist", leftUpperArmDir);
+  const rightForearmDir = direction("right_elbow", "right_wrist", rightUpperArmDir);
+  const leftThighDir = direction("left_hip", "left_knee", vecNormalize(vecAdd(vecScale(lateralAxis, -0.12), vecScale(torsoAxis, 1))));
+  const rightThighDir = direction("right_hip", "right_knee", vecNormalize(vecAdd(vecScale(lateralAxis, 0.12), vecScale(torsoAxis, 1))));
+  const leftShinDir = direction("left_knee", "left_ankle", leftThighDir);
+  const rightShinDir = direction("right_knee", "right_ankle", rightThighDir);
+  const leftFootDir = direction("left_ankle", "left_foot_index", vecNormalize(vecAdd(vecScale(lateralAxis, -0.18), vecScale(torsoAxis, 0.08)), { x: 1, y: 0 }));
+  const rightFootDir = direction("right_ankle", "right_foot_index", vecNormalize(vecAdd(vecScale(lateralAxis, 0.18), vecScale(torsoAxis, 0.08)), { x: 1, y: 0 }));
+
+  rig.leftElbow = vecAdd(rig.leftShoulder, vecScale(leftUpperArmDir, lengths.upperArm));
+  rig.rightElbow = vecAdd(rig.rightShoulder, vecScale(rightUpperArmDir, lengths.upperArm));
+  rig.leftWrist = vecAdd(rig.leftElbow, vecScale(leftForearmDir, lengths.forearm));
+  rig.rightWrist = vecAdd(rig.rightElbow, vecScale(rightForearmDir, lengths.forearm));
+  rig.leftKnee = vecAdd(rig.leftHip, vecScale(leftThighDir, lengths.thigh));
+  rig.rightKnee = vecAdd(rig.rightHip, vecScale(rightThighDir, lengths.thigh));
+  rig.leftAnkle = vecAdd(rig.leftKnee, vecScale(leftShinDir, lengths.shin));
+  rig.rightAnkle = vecAdd(rig.rightKnee, vecScale(rightShinDir, lengths.shin));
+  rig.leftFoot = vecAdd(rig.leftAnkle, vecScale(leftFootDir, lengths.foot));
+  rig.rightFoot = vecAdd(rig.rightAnkle, vecScale(rightFootDir, lengths.foot));
+
+  return rig;
 }
 
 function drawBackdrop(ctx, width, height) {
   ctx.clearRect(0, 0, width, height);
 
-  const bg = ctx.createLinearGradient(0, 0, 0, height);
-  bg.addColorStop(0, "rgba(9, 14, 18, 1)");
-  bg.addColorStop(1, "rgba(5, 7, 11, 1)");
-  ctx.fillStyle = bg;
+  const background = ctx.createLinearGradient(0, 0, 0, height);
+  background.addColorStop(0, "rgba(9, 14, 18, 1)");
+  background.addColorStop(1, "rgba(4, 7, 12, 1)");
+  ctx.fillStyle = background;
   ctx.fillRect(0, 0, width, height);
 
-  const halo = ctx.createRadialGradient(width * 0.5, height * 0.18, 10, width * 0.5, height * 0.18, width * 0.48);
-  halo.addColorStop(0, "rgba(82, 223, 255, 0.16)");
+  const halo = ctx.createRadialGradient(width * 0.5, height * 0.16, 10, width * 0.5, height * 0.16, width * 0.5);
+  halo.addColorStop(0, "rgba(82, 223, 255, 0.18)");
   halo.addColorStop(1, "rgba(82, 223, 255, 0)");
   ctx.fillStyle = halo;
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = "rgba(82, 223, 255, 0.09)";
+  ctx.strokeStyle = "rgba(82, 223, 255, 0.07)";
   ctx.lineWidth = 1;
-  for (let i = 0; i <= 7; i += 1) {
-    const y = height * (0.16 + i * 0.1);
+  for (let i = 0; i <= 8; i += 1) {
+    const y = height * (0.12 + i * 0.095);
     ctx.beginPath();
-    ctx.moveTo(width * 0.08, y);
-    ctx.lineTo(width * 0.92, y);
+    ctx.moveTo(width * 0.06, y);
+    ctx.lineTo(width * 0.94, y);
     ctx.stroke();
   }
 
   for (let i = 0; i <= 6; i += 1) {
-    const x = width * (0.14 + i * 0.12);
+    const x = width * (0.12 + i * 0.12);
     ctx.beginPath();
     ctx.moveTo(x, height * 0.12);
-    ctx.lineTo(x, height * 0.9);
+    ctx.lineTo(x, height * 0.88);
     ctx.stroke();
   }
 }
 
-function drawCapsule(ctx, start, end, width, palette, isHot = false) {
+function drawCapsule(ctx, start, end, width, palette, isHot) {
   if (!start || !end) return;
 
   const gradient = ctx.createLinearGradient(start.x, start.y, end.x, end.y);
@@ -339,7 +466,7 @@ function drawCapsule(ctx, start, end, width, palette, isHot = false) {
     gradient.addColorStop(1, palette.hot1);
   } else {
     gradient.addColorStop(0, palette.fill0);
-    gradient.addColorStop(0.5, palette.fill1);
+    gradient.addColorStop(0.52, palette.fill1);
     gradient.addColorStop(1, palette.fill2);
   }
 
@@ -347,15 +474,8 @@ function drawCapsule(ctx, start, end, width, palette, isHot = false) {
   ctx.strokeStyle = gradient;
   ctx.lineCap = "round";
   ctx.lineWidth = width;
-  ctx.shadowBlur = isHot ? width * 0.45 : width * 0.28;
+  ctx.shadowBlur = isHot ? width * 0.42 : width * 0.18;
   ctx.shadowColor = isHot ? palette.hotGlow : palette.glow;
-  ctx.beginPath();
-  ctx.moveTo(start.x, start.y);
-  ctx.lineTo(end.x, end.y);
-  ctx.stroke();
-
-  ctx.strokeStyle = isHot ? "rgba(255, 238, 234, 0.28)" : palette.specular;
-  ctx.lineWidth = Math.max(1.2, width * 0.18);
   ctx.beginPath();
   ctx.moveTo(start.x, start.y);
   ctx.lineTo(end.x, end.y);
@@ -363,13 +483,13 @@ function drawCapsule(ctx, start, end, width, palette, isHot = false) {
 
   ctx.fillStyle = isHot ? palette.hot1 : palette.joint;
   ctx.beginPath();
-  ctx.arc(start.x, start.y, width * 0.32, 0, Math.PI * 2);
-  ctx.arc(end.x, end.y, width * 0.32, 0, Math.PI * 2);
+  ctx.arc(start.x, start.y, width * 0.28, 0, Math.PI * 2);
+  ctx.arc(end.x, end.y, width * 0.28, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
-function drawPolygon(ctx, points, palette, isHot = false) {
+function drawPolygon(ctx, points, palette, isHot) {
   const valid = points.filter(Boolean);
   if (valid.length < 3) return;
 
@@ -377,7 +497,6 @@ function drawPolygon(ctx, points, palette, isHot = false) {
   const maxX = Math.max(...valid.map((point) => point.x));
   const minY = Math.min(...valid.map((point) => point.y));
   const maxY = Math.max(...valid.map((point) => point.y));
-
   const gradient = ctx.createLinearGradient(minX, minY, maxX, maxY);
   if (isHot) {
     gradient.addColorStop(0, palette.hot0);
@@ -390,9 +509,9 @@ function drawPolygon(ctx, points, palette, isHot = false) {
 
   ctx.save();
   ctx.fillStyle = gradient;
-  ctx.strokeStyle = isHot ? palette.hotEdge : palette.edge;
-  ctx.lineWidth = 1.5;
-  ctx.shadowBlur = isHot ? 18 : 10;
+  ctx.strokeStyle = isHot ? palette.hotEdge || palette.hot1 : palette.edge;
+  ctx.lineWidth = 1.2;
+  ctx.shadowBlur = isHot ? 18 : 8;
   ctx.shadowColor = isHot ? palette.hotGlow : palette.glow;
   ctx.beginPath();
   ctx.moveTo(valid[0].x, valid[0].y);
@@ -405,126 +524,88 @@ function drawPolygon(ctx, points, palette, isHot = false) {
   ctx.restore();
 }
 
-function drawHead(ctx, headCenter, shoulderMid, radius, palette, isHot = false) {
-  if (!headCenter || !shoulderMid) return;
+function drawAdultFigure(ctx, rig, hotNames, palette, isGhost = false) {
+  if (!rig) return;
 
-  const headGradient = ctx.createLinearGradient(headCenter.x, headCenter.y - radius, headCenter.x, headCenter.y + radius);
-  if (isHot) {
-    headGradient.addColorStop(0, palette.hot0);
-    headGradient.addColorStop(1, palette.hot1);
-  } else {
-    headGradient.addColorStop(0, palette.fill0);
-    headGradient.addColorStop(0.55, palette.fill1);
-    headGradient.addColorStop(1, palette.fill2);
-  }
-
-  ctx.save();
-  ctx.fillStyle = headGradient;
-  ctx.strokeStyle = isHot ? palette.hotEdge : palette.edge;
-  ctx.lineWidth = 1.4;
-  ctx.shadowBlur = isHot ? 18 : 12;
-  ctx.shadowColor = isHot ? palette.hotGlow : palette.glow;
-  ctx.beginPath();
-  ctx.ellipse(headCenter.x, headCenter.y, radius * 0.82, radius, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.strokeStyle = palette.specular;
-  ctx.lineWidth = Math.max(1, radius * 0.12);
-  ctx.beginPath();
-  ctx.moveTo(headCenter.x, headCenter.y - radius * 0.55);
-  ctx.lineTo(headCenter.x, headCenter.y + radius * 0.28);
-  ctx.stroke();
-  ctx.restore();
-
-  drawCapsule(ctx, shoulderMid, { x: headCenter.x, y: headCenter.y + radius * 0.86 }, radius * 0.32, palette, isHot);
-}
-
-function isSegmentHot(highlightedIndices, ...names) {
-  return names.some((name) => highlightedIndices.has(getLandmarkIndex(name)));
-}
-
-function buildProjectedLandmarks(landmarks, width, height) {
-  const angle = 0.3;
-  const tilt = -0.18;
-  return landmarks.map((point) => projectPoint(transformPoint(point, angle, tilt), width, height));
-}
-
-function drawMannequin(ctx, landmarks, highlightedIndices, palette, width, height, isGhost = false) {
-  if (!Array.isArray(landmarks) || !landmarks.length) return;
-
-  const projected = buildProjectedLandmarks(landmarks, width, height);
-  const leftShoulder = getProjectedPoint(projected, "left_shoulder");
-  const rightShoulder = getProjectedPoint(projected, "right_shoulder");
-  const leftHip = getProjectedPoint(projected, "left_hip");
-  const rightHip = getProjectedPoint(projected, "right_hip");
-  const shoulderMid = averagePoints([leftShoulder, rightShoulder]);
-  const hipMid = averagePoints([leftHip, rightHip]);
-  if (!shoulderMid || !hipMid) return;
-
-  const bodyScale = clamp(distance(leftShoulder, rightShoulder), width * 0.12, width * 0.21);
   const blinkOn = !isGhost && state.avatar ? state.avatar.blinkVisible : true;
-  const leftChest = lerpPoint(leftShoulder, leftHip, 0.28);
-  const rightChest = lerpPoint(rightShoulder, rightHip, 0.28);
-  const leftWaist = lerpPoint(leftShoulder, leftHip, 0.72);
-  const rightWaist = lerpPoint(rightShoulder, rightHip, 0.72);
-  const sternum = lerpPoint(shoulderMid, hipMid, 0.34);
-  const pelvis = lerpPoint(shoulderMid, hipMid, 0.88);
-  const headAnchor = averagePoints([
-    getProjectedPoint(projected, "nose"),
-    getProjectedPoint(projected, "left_eye"),
-    getProjectedPoint(projected, "right_eye"),
-    getProjectedPoint(projected, "left_ear"),
-    getProjectedPoint(projected, "right_ear"),
-  ]) || {
-    x: shoulderMid.x,
-    y: shoulderMid.y - bodyScale * 1.08,
-    scale: shoulderMid.scale,
-    depth: shoulderMid.depth - 0.1,
-  };
-  const headRadius = bodyScale * 0.28;
+  const isHot = (...names) => blinkOn && names.some((name) => hotNames.has(name));
+  const head = rig.headUnit;
+
+  const chestLeft = vecLerp(rig.leftShoulder, rig.leftHip, 0.24);
+  const chestRight = vecLerp(rig.rightShoulder, rig.rightHip, 0.24);
+  const waistLeft = vecLerp(rig.leftShoulder, rig.leftHip, 0.72);
+  const waistRight = vecLerp(rig.rightShoulder, rig.rightHip, 0.72);
 
   ctx.save();
   if (isGhost) {
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = 0.88;
   }
 
-  const torsoHot = blinkOn && isSegmentHot(highlightedIndices, "left_shoulder", "right_shoulder", "left_hip", "right_hip");
-  drawPolygon(ctx, [leftShoulder, rightShoulder, rightChest, leftChest], palette, torsoHot);
-  drawPolygon(ctx, [leftChest, rightChest, rightWaist, pelvis, leftWaist], palette, torsoHot);
-  drawPolygon(ctx, [leftWaist, rightWaist, rightHip, leftHip], palette, torsoHot);
+  drawPolygon(
+    ctx,
+    [rig.leftShoulder, rig.rightShoulder, chestRight, chestLeft],
+    palette,
+    isHot("left_shoulder", "right_shoulder"),
+  );
+  drawPolygon(
+    ctx,
+    [chestLeft, chestRight, waistRight, rig.pelvis, waistLeft],
+    palette,
+    isHot("left_shoulder", "right_shoulder", "left_hip", "right_hip"),
+  );
+  drawPolygon(ctx, [waistLeft, waistRight, rig.rightHip, rig.leftHip], palette, isHot("left_hip", "right_hip"));
 
-  BODY_SEGMENTS.forEach((segment) => {
-    const start = getProjectedPoint(projected, segment.a);
-    const end = getProjectedPoint(projected, segment.b);
-    const segmentHot = blinkOn && isSegmentHot(highlightedIndices, segment.a, segment.b);
-    drawCapsule(ctx, start, end, bodyScale * segment.scale, palette, segmentHot);
-  });
+  drawCapsule(ctx, rig.leftShoulder, rig.leftElbow, head * 0.34, palette, isHot("left_shoulder", "left_elbow"));
+  drawCapsule(ctx, rig.leftElbow, rig.leftWrist, head * 0.28, palette, isHot("left_elbow", "left_wrist"));
+  drawCapsule(ctx, rig.rightShoulder, rig.rightElbow, head * 0.34, palette, isHot("right_shoulder", "right_elbow"));
+  drawCapsule(ctx, rig.rightElbow, rig.rightWrist, head * 0.28, palette, isHot("right_elbow", "right_wrist"));
+  drawCapsule(ctx, rig.leftHip, rig.leftKnee, head * 0.46, palette, isHot("left_hip", "left_knee"));
+  drawCapsule(ctx, rig.leftKnee, rig.leftAnkle, head * 0.36, palette, isHot("left_knee", "left_ankle"));
+  drawCapsule(ctx, rig.rightHip, rig.rightKnee, head * 0.46, palette, isHot("right_hip", "right_knee"));
+  drawCapsule(ctx, rig.rightKnee, rig.rightAnkle, head * 0.36, palette, isHot("right_knee", "right_ankle"));
+  drawCapsule(ctx, rig.leftAnkle, rig.leftFoot, head * 0.18, palette, isHot("left_ankle", "left_foot_index", "left_heel"));
+  drawCapsule(ctx, rig.rightAnkle, rig.rightFoot, head * 0.18, palette, isHot("right_ankle", "right_foot_index", "right_heel"));
+  drawCapsule(ctx, rig.neck, rig.sternum, head * 0.18, palette, isHot("left_shoulder", "right_shoulder"));
 
-  drawCapsule(ctx, shoulderMid, sternum, bodyScale * 0.14, palette, torsoHot);
-  drawHead(ctx, headAnchor, shoulderMid, headRadius, palette, torsoHot);
+  const headHot = isHot("left_shoulder", "right_shoulder");
+  drawPolygon(
+    ctx,
+    [
+      { x: rig.headCenter.x - head * 0.34, y: rig.headCenter.y - head * 0.15 },
+      { x: rig.headCenter.x + head * 0.34, y: rig.headCenter.y - head * 0.15 },
+      { x: rig.headCenter.x + head * 0.28, y: rig.headCenter.y + head * 0.55 },
+      { x: rig.headCenter.x - head * 0.28, y: rig.headCenter.y + head * 0.55 },
+    ],
+    palette,
+    headHot,
+  );
+
   ctx.restore();
 }
 
 function renderAvatar() {
   if (!state.avatar) return;
-
   resizeAvatarCanvas();
+
   const { canvas, ctx } = state.avatar;
   const width = canvas.width;
   const height = canvas.height;
   if (!width || !height) return;
 
   drawBackdrop(ctx, width, height);
-  drawMannequin(ctx, state.avatar.referenceLandmarks, new Set(), avatarPalette.reference, width, height, true);
-  drawMannequin(ctx, state.avatar.wrongLandmarks, state.avatar.highlightedIndices, avatarPalette.live, width, height, false);
 
-  ctx.fillStyle = "rgba(245, 246, 247, 0.92)";
-  ctx.font = `${Math.max(12, Math.round(height * 0.032))}px "Space Grotesk", sans-serif`;
-  ctx.fillText("Mannequin pose twin", width * 0.06, height * 0.08);
-  ctx.fillStyle = "rgba(155, 167, 179, 0.92)";
-  ctx.font = `${Math.max(11, Math.round(height * 0.024))}px "Pretendard", sans-serif`;
-  ctx.fillText("solid body = wrong, ghost body = correct", width * 0.06, height * 0.135);
+  const referenceRig = buildAdultRig(state.avatar.referenceLandmarks, width, height);
+  const wrongRig = buildAdultRig(state.avatar.wrongLandmarks, width, height);
+
+  drawAdultFigure(ctx, referenceRig, new Set(), avatarPalette.reference, true);
+  drawAdultFigure(ctx, wrongRig, state.avatar.hotNames || new Set(), avatarPalette.live, false);
+
+  ctx.fillStyle = "rgba(245, 246, 247, 0.88)";
+  ctx.font = `${Math.max(12, Math.round(height * 0.03))}px "Space Grotesk", sans-serif`;
+  ctx.fillText("8-head mannequin", width * 0.06, height * 0.08);
+  ctx.fillStyle = "rgba(155, 167, 179, 0.88)";
+  ctx.font = `${Math.max(11, Math.round(height * 0.022))}px "Pretendard", sans-serif`;
+  ctx.fillText("white = wrong, blue ghost = correct", width * 0.06, height * 0.13);
 }
 
 function initAvatar() {
@@ -535,20 +616,18 @@ function initAvatar() {
     ctx,
     wrongLandmarks: null,
     referenceLandmarks: null,
-    highlightedIndices: new Set(),
+    hotNames: new Set(),
     blinkVisible: true,
-    blinkTimerId: null,
+    blinkTimerId: window.setInterval(() => {
+      if (!state.avatar) return;
+      state.avatar.blinkVisible = !state.avatar.blinkVisible;
+      if (state.avatar.hotNames.size) {
+        renderAvatar();
+      }
+    }, BLINK_INTERVAL_MS),
   };
 
   window.addEventListener("resize", renderAvatar);
-  state.avatar.blinkTimerId = window.setInterval(() => {
-    if (!state.avatar) return;
-    state.avatar.blinkVisible = !state.avatar.blinkVisible;
-    if (state.avatar.highlightedIndices.size) {
-      renderAvatar();
-    }
-  }, BLINK_INTERVAL_MS);
-  resizeAvatarCanvas();
   renderAvatar();
 }
 
@@ -559,7 +638,6 @@ function resetVoiceTracking() {
 
 function maybeSpeak(frame, warningIssue) {
   if (!state.voiceEnabled || !warningIssue || !("speechSynthesis" in window)) return;
-
   if (frame.score > VOICE_SCORE_THRESHOLD) {
     resetVoiceTracking();
     return;
@@ -582,7 +660,7 @@ function maybeSpeak(frame, warningIssue) {
 
   const utterance = new SpeechSynthesisUtterance(frame.coach_text);
   utterance.lang = "ko-KR";
-  utterance.rate = 0.98;
+  utterance.rate = 0.97;
   window.speechSynthesis.speak(utterance);
 
   state.voice.lastSpokenIssueId = issueId;
@@ -594,15 +672,16 @@ function updateFrame(frame) {
   if (!frame) return;
   state.currentFrame = frame;
 
+  const displayedScore = getDisplayedScore(frame);
   const topIssue = (frame.issues || [])[0] || null;
-  const warningIssue = topIssue && frame.score <= WARNING_SCORE_THRESHOLD ? topIssue : null;
+  const warningIssue = topIssue && displayedScore <= WARNING_SCORE_THRESHOLD ? topIssue : null;
 
+  elements.scoreValue.textContent = `${Math.round(displayedScore)}`;
   elements.currentIssue.textContent = warningIssue ? warningIssue.label : "기준 자세 범위";
-  elements.scoreValue.textContent = `${Math.round(frame.score)}`;
   elements.phaseLabel.textContent = `Rep ${frame.rep_index} · ${frame.phase}`;
   elements.coachText.textContent = warningIssue
     ? frame.coach_text
-    : "현재 프레임은 기준 스쿼트 범위 안에 있어 음성 안내를 쉬고 있습니다.";
+    : "현재 1초 평균 점수 기준으로는 경고 임계값 아래로 떨어지지 않았습니다.";
 
   renderMetrics(frame);
 
@@ -612,26 +691,15 @@ function updateFrame(frame) {
     cursor.style.left = `${(frame.time_sec / duration) * 100}%`;
   }
 
-  const highlightedIndices = warningIssue
-    ? new Set(
-        (frame.highlighted_joint_names || [])
-          .flatMap((name) => [
-            state.data.landmark_index[name],
-            state.data.landmark_index[`left_${name}`],
-            state.data.landmark_index[`right_${name}`],
-          ])
-          .filter((value) => Number.isInteger(value)),
-      )
-    : new Set();
-
+  const hotNames = warningIssue ? getHotJointNames(warningIssue.id) : new Set();
   if (state.avatar) {
     state.avatar.wrongLandmarks = frame.wrong.world_landmarks;
     state.avatar.referenceLandmarks = frame.reference.world_landmarks;
-    state.avatar.highlightedIndices = highlightedIndices;
+    state.avatar.hotNames = hotNames;
     renderAvatar();
   }
 
-  maybeSpeak(frame, warningIssue);
+  maybeSpeak({ ...frame, score: displayedScore }, warningIssue);
 }
 
 function showFrame(index) {
@@ -666,8 +734,7 @@ function play() {
 }
 
 function seekToTime(timeSec) {
-  const index = findNearestFrameIndex(timeSec);
-  showFrame(index);
+  showFrame(findNearestFrameIndex(timeSec));
 }
 
 function bindControls() {
@@ -696,13 +763,13 @@ async function bootstrap() {
   }
 
   state.data = await response.json();
+  state.scoreBuckets = buildScoreBuckets(state.data.frames);
   state.player.fps = state.data.input_videos.wrong.sampled_fps || 10;
-  const findingLabels = state.data.overview.top_findings.map((item) => item.label).join(" / ");
 
   elements.averageScore.textContent = `${Math.round(state.data.overview.average_score)}`;
   elements.repCount.textContent = `${state.data.overview.rep_count}`;
   elements.thresholdValue.textContent = `${WARNING_SCORE_THRESHOLD}`;
-  elements.summaryText.textContent = `주요 이탈: ${findingLabels}.`;
+  elements.summaryText.textContent = `1초 평균 점수 기준으로 주요 이탈은 ${state.data.overview.top_findings.map((item) => item.label).join(" / ")} 입니다.`;
 
   buildTimeline();
   renderFindings();
