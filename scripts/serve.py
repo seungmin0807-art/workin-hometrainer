@@ -7,6 +7,14 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+class NoCacheHandler(SimpleHTTPRequestHandler):
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the static prototype locally.")
     parser.add_argument("--root", type=Path, default=Path("app"), help="Directory to serve.")
@@ -24,7 +32,7 @@ def main() -> None:
 
     os.chdir(root)
     url = f"http://{args.host}:{args.port}"
-    server = ThreadingHTTPServer((args.host, args.port), SimpleHTTPRequestHandler)
+    server = ThreadingHTTPServer((args.host, args.port), NoCacheHandler)
     print(f"Serving {root} at {url}")
 
     if args.open:

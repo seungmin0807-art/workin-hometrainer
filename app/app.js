@@ -1,5 +1,3 @@
-import * as THREE from "./vendor/three.module.js";
-
 const state = {
   data: null,
   currentFrame: null,
@@ -38,6 +36,15 @@ const metricLabels = {
   knee_angle: "Knee angle",
   depth_score: "Depth score",
   shin_lean_deg: "Shin lean",
+};
+
+const rigColors = {
+  live: "#ff574d",
+  liveBone: "rgba(82, 223, 255, 0.86)",
+  ref: "rgba(255, 208, 79, 0.94)",
+  refBone: "rgba(255, 208, 79, 0.35)",
+  grid: "rgba(82, 223, 255, 0.12)",
+  text: "rgba(245, 246, 247, 0.92)",
 };
 
 function fmt(value, digits = 1, suffix = "") {
@@ -144,144 +151,193 @@ function renderMetrics(frame) {
   });
 }
 
-function createRig(colorHex, opacity = 1, radius = 0.032) {
-  const group = new THREE.Group();
-  const jointMeshes = [];
-  const boneMeshes = [];
-
-  const jointMaterial = new THREE.MeshStandardMaterial({
-    color: colorHex,
-    emissive: colorHex,
-    emissiveIntensity: opacity < 1 ? 0.2 : 0.45,
-    transparent: opacity < 1,
-    opacity,
-    roughness: 0.35,
-    metalness: 0.12,
-  });
-  const jointGeometry = new THREE.SphereGeometry(radius, 16, 16);
-
-  for (let i = 0; i < 33; i += 1) {
-    const mesh = new THREE.Mesh(jointGeometry, jointMaterial.clone());
-    group.add(mesh);
-    jointMeshes.push(mesh);
-  }
-
-  const boneGeometry = new THREE.CylinderGeometry(radius * 0.56, radius * 0.56, 1, 10);
-  state.data.connections.forEach(() => {
-    const mesh = new THREE.Mesh(
-      boneGeometry,
-      new THREE.MeshStandardMaterial({
-        color: colorHex,
-        emissive: colorHex,
-        emissiveIntensity: opacity < 1 ? 0.12 : 0.3,
-        transparent: opacity < 1,
-        opacity,
-        roughness: 0.45,
-        metalness: 0.16,
-      }),
-    );
-    group.add(mesh);
-    boneMeshes.push(mesh);
-  });
-
-  return { group, jointMeshes, boneMeshes };
+function ensureAvatarCanvas() {
+  const canvas = document.createElement("canvas");
+  canvas.className = "avatar-canvas";
+  elements.avatarViewport.innerHTML = "";
+  elements.avatarViewport.appendChild(canvas);
+  return canvas;
 }
 
-function toWorldVectors(landmarks) {
-  if (!landmarks) return [];
-  return landmarks.map((point) => new THREE.Vector3(-point[0] * 6, -point[1] * 6 + 1.1, -point[2] * 6));
+function resizeAvatarCanvas() {
+  if (!state.avatar) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.floor(elements.avatarViewport.clientWidth * dpr));
+  const height = Math.max(1, Math.floor(elements.avatarViewport.clientHeight * dpr));
+  if (state.avatar.canvas.width !== width || state.avatar.canvas.height !== height) {
+    state.avatar.canvas.width = width;
+    state.avatar.canvas.height = height;
+  }
 }
 
-function applyRigFrame(rig, landmarks, highlightIndices = new Set()) {
-  if (!landmarks || !landmarks.length) {
-    rig.group.visible = false;
-    return;
+function transformPoint(rawPoint, angle, tilt) {
+  const x = -(rawPoint[0] || 0);
+  const y = -(rawPoint[1] || 0) + 0.2;
+  const z = rawPoint[2] || 0;
+
+  const cosY = Math.cos(angle);
+  const sinY = Math.sin(angle);
+  const x1 = x * cosY - z * sinY;
+  const z1 = x * sinY + z * cosY;
+
+  const cosX = Math.cos(tilt);
+  const sinX = Math.sin(tilt);
+  const y1 = y * cosX - z1 * sinX;
+  const z2 = y * sinX + z1 * cosX;
+
+  return { x: x1, y: y1, z: z2 };
+}
+
+function projectPoint(point, width, height) {
+  const depth = 3.7;
+  const cameraZ = 4.8;
+  const scale = depth / (cameraZ - point.z);
+  return {
+    x: width * 0.5 + point.x * width * 0.24 * scale,
+    y: height * 0.53 + point.y * height * 0.34 * scale,
+    scale,
+    depth: point.z,
+  };
+}
+
+function drawBackdrop(ctx, width, height) {
+  ctx.clearRect(0, 0, width, height);
+
+  const bg = ctx.createLinearGradient(0, 0, 0, height);
+  bg.addColorStop(0, "rgba(8, 13, 18, 1)");
+  bg.addColorStop(1, "rgba(4, 6, 9, 1)");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  const glow = ctx.createRadialGradient(width * 0.5, height * 0.18, 10, width * 0.5, height * 0.18, width * 0.42);
+  glow.addColorStop(0, "rgba(82, 223, 255, 0.18)");
+  glow.addColorStop(1, "rgba(82, 223, 255, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.strokeStyle = rigColors.grid;
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 8; i += 1) {
+    const y = height * (0.15 + i * 0.09);
+    ctx.beginPath();
+    ctx.moveTo(width * 0.05, y);
+    ctx.lineTo(width * 0.95, y);
+    ctx.stroke();
   }
 
-  rig.group.visible = true;
-  const points = toWorldVectors(landmarks);
-  const up = new THREE.Vector3(0, 1, 0);
+  for (let i = 0; i <= 8; i += 1) {
+    const x = width * (0.14 + i * 0.09);
+    ctx.beginPath();
+    ctx.moveTo(x, height * 0.12);
+    ctx.lineTo(x, height * 0.9);
+    ctx.stroke();
+  }
+}
 
-  rig.jointMeshes.forEach((mesh, index) => {
-    const point = points[index];
-    mesh.position.copy(point);
-    const isHot = highlightIndices.has(index);
-    mesh.scale.setScalar(isHot ? 1.45 : 1);
-    mesh.material.emissiveIntensity = isHot ? 0.8 : 0.35;
-    if (mesh.material.opacity < 1) {
-      mesh.material.color.setHex(0xffd04f);
-    } else {
-      mesh.material.color.setHex(isHot ? 0xff574d : 0x52dfff);
-    }
+function drawRig(ctx, landmarks, highlightedIndices, palette, width, height, angle, tilt) {
+  if (!Array.isArray(landmarks) || !landmarks.length) return;
+
+  const projected = landmarks.map((point) => projectPoint(transformPoint(point, angle, tilt), width, height));
+  const bones = state.data.connections
+    .map(([aIndex, bIndex]) => ({ a: projected[aIndex], b: projected[bIndex] }))
+    .filter(({ a, b }) => a && b)
+    .sort((left, right) => ((left.a.depth + left.b.depth) * 0.5) - ((right.a.depth + right.b.depth) * 0.5));
+
+  ctx.lineCap = "round";
+  bones.forEach(({ a, b }) => {
+    ctx.strokeStyle = palette.bone;
+    ctx.lineWidth = Math.max(1, ((a.scale + b.scale) * 0.5) * 5.5);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
   });
 
-  rig.boneMeshes.forEach((mesh, idx) => {
-    const [aIdx, bIdx] = state.data.connections[idx];
-    const start = points[aIdx];
-    const end = points[bIdx];
-    const direction = new THREE.Vector3().subVectors(end, start);
-    const length = direction.length();
-    mesh.visible = length > 0.0001;
-    if (!mesh.visible) return;
-    mesh.position.copy(start).add(end).multiplyScalar(0.5);
-    mesh.scale.set(1, length, 1);
-    mesh.quaternion.setFromUnitVectors(up, direction.clone().normalize());
-  });
+  projected
+    .map((point, index) => ({ point, index }))
+    .sort((left, right) => left.point.depth - right.point.depth)
+    .forEach(({ point, index }) => {
+      const radius = Math.max(2.2, point.scale * 7.2);
+      const isHighlighted = highlightedIndices.has(index);
+
+      ctx.fillStyle = isHighlighted ? palette.hot : palette.joint;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, isHighlighted ? radius * 1.28 : radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (isHighlighted) {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, radius * 1.75, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    });
+}
+
+function renderAvatar() {
+  if (!state.avatar) return;
+
+  resizeAvatarCanvas();
+
+  const { canvas, ctx } = state.avatar;
+  const width = canvas.width;
+  const height = canvas.height;
+  if (!width || !height) return;
+
+  drawBackdrop(ctx, width, height);
+
+  const baseAngle = state.avatar.angle;
+  const tilt = -0.22;
+  drawRig(ctx, state.avatar.referenceLandmarks, new Set(), {
+    joint: rigColors.ref,
+    bone: rigColors.refBone,
+    hot: rigColors.ref,
+  }, width, height, baseAngle - 0.07, tilt);
+  drawRig(ctx, state.avatar.wrongLandmarks, state.avatar.highlightedIndices, {
+    joint: rigColors.liveBone,
+    bone: "rgba(82, 223, 255, 0.92)",
+    hot: rigColors.live,
+  }, width, height, baseAngle + 0.03, tilt);
+
+  ctx.fillStyle = rigColors.text;
+  ctx.font = `${Math.max(12, Math.round(height * 0.036))}px "Space Grotesk", sans-serif`;
+  ctx.fillText("Perspective Skeleton", width * 0.05, height * 0.08);
+  ctx.fillStyle = "rgba(155, 167, 179, 0.92)";
+  ctx.font = `${Math.max(11, Math.round(height * 0.026))}px "Pretendard", sans-serif`;
+  ctx.fillText("wrong vs correct world landmarks", width * 0.05, height * 0.14);
+}
+
+function startAvatarLoop() {
+  const tick = () => {
+    if (!state.avatar) return;
+    state.avatar.angle += 0.006;
+    renderAvatar();
+    state.avatar.rafId = window.requestAnimationFrame(tick);
+  };
+  tick();
 }
 
 function initAvatar() {
-  const width = elements.avatarViewport.clientWidth;
-  const height = elements.avatarViewport.clientHeight;
-
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 100);
-  camera.position.set(1.8, 1.5, 4.8);
-  camera.lookAt(0, 1, 0);
-
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(width, height);
-  elements.avatarViewport.appendChild(renderer.domElement);
-
-  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-
-  const key = new THREE.DirectionalLight(0x84e4ff, 1.05);
-  key.position.set(3, 6, 5);
-  scene.add(key);
-
-  const fill = new THREE.DirectionalLight(0xffd04f, 0.65);
-  fill.position.set(-3, 3, -2);
-  scene.add(fill);
-
-  const grid = new THREE.GridHelper(10, 20, 0x1a3c46, 0x142129);
-  grid.position.y = -1.9;
-  scene.add(grid);
-
-  const wrongRig = createRig(0x52dfff, 1, 0.04);
-  const refRig = createRig(0xffd04f, 0.36, 0.028);
-  scene.add(refRig.group);
-  scene.add(wrongRig.group);
-
-  state.avatar = { scene, camera, renderer, wrongRig, refRig };
+  const canvas = ensureAvatarCanvas();
+  const ctx = canvas.getContext("2d");
+  state.avatar = {
+    canvas,
+    ctx,
+    wrongLandmarks: null,
+    referenceLandmarks: null,
+    highlightedIndices: new Set(),
+    angle: 0.42,
+    rafId: null,
+  };
 
   const resize = () => {
-    const w = elements.avatarViewport.clientWidth;
-    const h = elements.avatarViewport.clientHeight;
-    renderer.setSize(w, h);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+    renderAvatar();
   };
   window.addEventListener("resize", resize);
-
-  const tick = () => {
-    requestAnimationFrame(tick);
-    const t = performance.now() * 0.00014;
-    camera.position.x = Math.sin(t) * 0.7 + 1.5;
-    camera.position.z = Math.cos(t) * 0.7 + 4.4;
-    camera.lookAt(0, 0.9, 0);
-    renderer.render(scene, camera);
-  };
-  tick();
+  resizeAvatarCanvas();
+  renderAvatar();
+  startAvatarLoop();
 }
 
 function maybeSpeak(text) {
@@ -315,15 +371,19 @@ function updateFrame(frame) {
     cursor.style.left = `${(frame.time_sec / duration) * 100}%`;
   }
 
-  const side = state.data.input_videos.wrong.primary_side;
-  const highlighted = new Set(
-    frame.highlighted_joint_names
-      .map((name) => state.data.landmark_index[`${side}_${name}`])
+  const highlightedIndices = new Set(
+    (frame.highlighted_joint_names || [])
+      .map((name) => state.data.landmark_index[name] ?? state.data.landmark_index[`left_${name}`] ?? state.data.landmark_index[`right_${name}`])
       .filter((value) => Number.isInteger(value)),
   );
 
-  applyRigFrame(state.avatar.wrongRig, frame.wrong.world_landmarks, highlighted);
-  applyRigFrame(state.avatar.refRig, frame.reference.world_landmarks);
+  if (state.avatar) {
+    state.avatar.wrongLandmarks = frame.wrong.world_landmarks;
+    state.avatar.referenceLandmarks = frame.reference.world_landmarks;
+    state.avatar.highlightedIndices = highlightedIndices;
+    renderAvatar();
+  }
+
   maybeSpeak(frame.coach_text);
 }
 
