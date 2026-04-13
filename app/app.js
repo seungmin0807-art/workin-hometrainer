@@ -5,6 +5,79 @@ const VOICE_REPEAT_GAP_MS = 15000;
 const VOICE_STABLE_FRAMES = 4;
 const BLINK_INTERVAL_MS = 280;
 
+const SUPPORT_JOINT_NAMES = [
+  "left_hip",
+  "right_hip",
+  "left_knee",
+  "right_knee",
+  "left_ankle",
+  "right_ankle",
+  "left_heel",
+  "right_heel",
+  "left_foot_index",
+  "right_foot_index",
+];
+
+const GROUND_JOINT_NAMES = [
+  "left_ankle",
+  "right_ankle",
+  "left_heel",
+  "right_heel",
+  "left_foot_index",
+  "right_foot_index",
+];
+
+const FOOT_LOCK_BLEND = {
+  left_heel: 0.88,
+  right_heel: 0.88,
+  left_foot_index: 0.84,
+  right_foot_index: 0.84,
+  left_ankle: 0.72,
+  right_ankle: 0.72,
+};
+
+const FACE_JOINT_NAMES = [
+  "nose",
+  "left_eye",
+  "right_eye",
+  "left_ear",
+  "right_ear",
+];
+
+const ISSUE_HOT_NAMES = {
+  knee_flexion: (side) => [`${side}_hip`, `${side}_knee`, `${side}_ankle`],
+  shin_lean: (side) => [`${side}_knee`, `${side}_ankle`, `${side}_heel`, `${side}_foot_index`],
+  torso_lean: (side) => [`${side}_shoulder`, `${side}_hip`],
+  depth: () => ["left_hip", "right_hip", "left_knee", "right_knee"],
+};
+
+const avatarPalette = {
+  live: {
+    fill0: "rgba(255, 255, 255, 0.4)",
+    fill1: "rgba(255, 255, 255, 0.32)",
+    fill2: "rgba(255, 255, 255, 0.26)",
+    edge: "rgba(255, 255, 255, 0.18)",
+    glow: "rgba(255, 255, 255, 0.08)",
+    joint: "rgba(255, 255, 255, 0.45)",
+    hot0: "rgba(255, 160, 148, 0.96)",
+    hot1: "rgba(255, 88, 76, 0.98)",
+    hotEdge: "rgba(255, 228, 224, 0.52)",
+    hotGlow: "rgba(255, 87, 77, 0.32)",
+  },
+  reference: {
+    fill0: "rgba(92, 206, 255, 0.3)",
+    fill1: "rgba(82, 176, 255, 0.22)",
+    fill2: "rgba(52, 120, 255, 0.16)",
+    edge: "rgba(118, 204, 255, 0.22)",
+    glow: "rgba(82, 223, 255, 0.14)",
+    joint: "rgba(164, 231, 255, 0.26)",
+    hot0: "rgba(92, 206, 255, 0.3)",
+    hot1: "rgba(52, 120, 255, 0.22)",
+    hotEdge: "rgba(118, 204, 255, 0.22)",
+    hotGlow: "rgba(82, 223, 255, 0.14)",
+  },
+};
+
 const state = {
   data: null,
   scoreBuckets: new Map(),
@@ -50,46 +123,19 @@ const metricLabels = {
   shin_lean_deg: "Shin lean",
 };
 
-const ISSUE_HOT_NAMES = {
-  knee_flexion: (side) => [`${side}_hip`, `${side}_knee`, `${side}_ankle`],
-  shin_lean: (side) => [`${side}_knee`, `${side}_ankle`, `${side}_heel`, `${side}_foot_index`],
-  torso_lean: (side) => [`${side}_shoulder`, `${side}_hip`],
-  depth: () => ["left_hip", "right_hip", "left_knee", "right_knee"],
-};
-
-const avatarPalette = {
-  live: {
-    fill0: "rgba(255, 255, 255, 0.42)",
-    fill1: "rgba(255, 255, 255, 0.34)",
-    fill2: "rgba(255, 255, 255, 0.28)",
-    edge: "rgba(255, 255, 255, 0.18)",
-    glow: "rgba(255, 255, 255, 0.08)",
-    joint: "rgba(255, 255, 255, 0.48)",
-    hot0: "rgba(255, 160, 148, 0.92)",
-    hot1: "rgba(255, 88, 76, 0.96)",
-    hotEdge: "rgba(255, 226, 222, 0.52)",
-    hotGlow: "rgba(255, 87, 77, 0.28)",
-  },
-  reference: {
-    fill0: "rgba(92, 206, 255, 0.28)",
-    fill1: "rgba(82, 176, 255, 0.22)",
-    fill2: "rgba(52, 120, 255, 0.16)",
-    edge: "rgba(118, 204, 255, 0.24)",
-    glow: "rgba(82, 223, 255, 0.14)",
-    joint: "rgba(164, 231, 255, 0.26)",
-    hot0: "rgba(92, 206, 255, 0.28)",
-    hot1: "rgba(52, 120, 255, 0.22)",
-    hotEdge: "rgba(118, 204, 255, 0.24)",
-    hotGlow: "rgba(82, 223, 255, 0.14)",
-  },
-};
-
 function fmt(value, digits = 1, suffix = "") {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
 }
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function median(values) {
+  const filtered = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!filtered.length) return null;
+  const mid = Math.floor(filtered.length / 2);
+  return filtered.length % 2 ? filtered[mid] : (filtered[mid - 1] + filtered[mid]) * 0.5;
 }
 
 function vecAdd(a, b) {
@@ -146,6 +192,50 @@ function getLandmarkIndex(name) {
   return state.data.landmark_index[name];
 }
 
+function cloneLandmarks(landmarks) {
+  return landmarks.map((point) => [
+    point[0] ?? 0,
+    point[1] ?? 0,
+    point[2] ?? 0,
+    point[3] ?? 1,
+  ]);
+}
+
+function getJointPoint(landmarks, name) {
+  const index = getLandmarkIndex(name);
+  return Number.isInteger(index) && landmarks?.[index] ? landmarks[index] : null;
+}
+
+function averageWorldPoints(landmarks, names) {
+  const points = names.map((name) => getJointPoint(landmarks, name)).filter(Boolean);
+  if (!points.length) return null;
+  return {
+    x: points.reduce((sum, point) => sum + point[0], 0) / points.length,
+    y: points.reduce((sum, point) => sum + point[1], 0) / points.length,
+    z: points.reduce((sum, point) => sum + point[2], 0) / points.length,
+  };
+}
+
+function buildScoreBuckets(frames) {
+  const buckets = new Map();
+  frames.forEach((frame) => {
+    const second = Math.floor(frame.time_sec);
+    const current = buckets.get(second) || { sum: 0, count: 0 };
+    current.sum += frame.score;
+    current.count += 1;
+    buckets.set(second, current);
+  });
+  buckets.forEach((bucket, second) => {
+    buckets.set(second, { ...bucket, avg: bucket.sum / bucket.count });
+  });
+  return buckets;
+}
+
+function getDisplayedScore(frame) {
+  const bucket = state.scoreBuckets.get(Math.floor(frame.time_sec));
+  return bucket ? bucket.avg : frame.score;
+}
+
 function getFramePath(index) {
   const media = state.data.media;
   const padded = String(index).padStart(4, "0");
@@ -171,30 +261,188 @@ function findNearestFrameIndex(timeSec) {
   return Math.abs(frames[a].time_sec - timeSec) <= Math.abs(frames[b].time_sec - timeSec) ? a : b;
 }
 
-function buildScoreBuckets(frames) {
-  const buckets = new Map();
-  frames.forEach((frame) => {
-    const second = Math.floor(frame.time_sec);
-    const current = buckets.get(second) || { sum: 0, count: 0 };
-    current.sum += frame.score;
-    current.count += 1;
-    buckets.set(second, current);
-  });
-  buckets.forEach((bucket, second) => {
-    buckets.set(second, { ...bucket, avg: bucket.sum / bucket.count });
-  });
-  return buckets;
-}
-
-function getDisplayedScore(frame) {
-  const bucket = state.scoreBuckets.get(Math.floor(frame.time_sec));
-  return bucket ? bucket.avg : frame.score;
-}
-
 function getHotJointNames(issueId) {
   const primarySide = state.data.input_videos.wrong.primary_side || "left";
   const resolver = ISSUE_HOT_NAMES[issueId];
   return new Set(resolver ? resolver(primarySide) : []);
+}
+
+function emaPass(sequence, alpha, selectedIndices = null) {
+  let previous = null;
+  return sequence.map((landmarks) => {
+    if (!landmarks) {
+      return previous ? cloneLandmarks(previous) : null;
+    }
+
+    if (!previous) {
+      previous = cloneLandmarks(landmarks);
+      return cloneLandmarks(previous);
+    }
+
+    const next = cloneLandmarks(landmarks);
+    const jointIndices = selectedIndices || landmarks.map((_, index) => index);
+    jointIndices.forEach((jointIndex) => {
+      for (let coord = 0; coord < 3; coord += 1) {
+        next[jointIndex][coord] =
+          alpha * landmarks[jointIndex][coord] + (1 - alpha) * previous[jointIndex][coord];
+      }
+      next[jointIndex][3] =
+        alpha * (landmarks[jointIndex][3] ?? 1) + (1 - alpha) * (previous[jointIndex][3] ?? 1);
+    });
+    previous = cloneLandmarks(next);
+    return next;
+  });
+}
+
+function smoothSequence(sequence, alpha, selectedIndices = null) {
+  const forward = emaPass(sequence, alpha, selectedIndices);
+  const backward = emaPass([...sequence].reverse(), alpha, selectedIndices).reverse();
+  return sequence.map((landmarks, frameIndex) => {
+    if (!landmarks) return null;
+    const forwardFrame = forward[frameIndex];
+    const backwardFrame = backward[frameIndex];
+    if (!forwardFrame || !backwardFrame) return cloneLandmarks(landmarks);
+
+    const result = cloneLandmarks(landmarks);
+    const jointIndices = selectedIndices || landmarks.map((_, index) => index);
+    jointIndices.forEach((jointIndex) => {
+      for (let coord = 0; coord < 4; coord += 1) {
+        result[jointIndex][coord] =
+          (forwardFrame[jointIndex][coord] + backwardFrame[jointIndex][coord]) * 0.5;
+      }
+    });
+    return result;
+  });
+}
+
+function buildSupportInfo(landmarks) {
+  const points = GROUND_JOINT_NAMES.map((name) => getJointPoint(landmarks, name)).filter(Boolean);
+  if (!points.length) return null;
+  return {
+    groundY: Math.max(...points.map((point) => point[1])),
+    centerX: points.reduce((sum, point) => sum + point[0], 0) / points.length,
+    centerZ: points.reduce((sum, point) => sum + point[2], 0) / points.length,
+  };
+}
+
+function buildHeadInfo(landmarks) {
+  const face = averageWorldPoints(landmarks, FACE_JOINT_NAMES);
+  if (face) return face;
+  const shoulders = averageWorldPoints(landmarks, ["left_shoulder", "right_shoulder"]);
+  const hips = averageWorldPoints(landmarks, ["left_hip", "right_hip"]);
+  if (!shoulders || !hips) return null;
+  const torso = {
+    x: shoulders.x,
+    y: shoulders.y - (hips.y - shoulders.y) * 0.55,
+    z: shoulders.z,
+  };
+  return torso;
+}
+
+function buildRootInfo(landmarks) {
+  return averageWorldPoints(landmarks, ["left_hip", "right_hip"]);
+}
+
+function buildJointAnchors(sequence, names) {
+  const anchors = {};
+  names.forEach((name) => {
+    const index = getLandmarkIndex(name);
+    if (!Number.isInteger(index)) return;
+
+    const xs = [];
+    const ys = [];
+    const zs = [];
+    sequence.forEach((landmarks) => {
+      if (!landmarks?.[index]) return;
+      xs.push(landmarks[index][0]);
+      ys.push(landmarks[index][1]);
+      zs.push(landmarks[index][2]);
+    });
+
+    if (!xs.length) return;
+    anchors[name] = {
+      x: median(xs),
+      y: median(ys),
+      z: median(zs),
+    };
+  });
+  return anchors;
+}
+
+function prepareAvatarTrack(roleKey) {
+  const sequence = state.data.frames.map((frame) => {
+    const landmarks = frame?.[roleKey]?.world_landmarks;
+    return Array.isArray(landmarks) && landmarks.length ? cloneLandmarks(landmarks) : null;
+  });
+
+  const jointIndices = SUPPORT_JOINT_NAMES.map(getLandmarkIndex).filter(Number.isInteger);
+  const smoothed = smoothSequence(sequence, 0.42);
+  const supportSmoothed = smoothSequence(smoothed, 0.16, jointIndices);
+
+  const supports = supportSmoothed.map((landmarks) => (landmarks ? buildSupportInfo(landmarks) : null));
+  const heads = supportSmoothed.map((landmarks) => (landmarks ? buildHeadInfo(landmarks) : null));
+  const roots = supportSmoothed.map((landmarks) => (landmarks ? buildRootInfo(landmarks) : null));
+
+  const targetGroundY = median(supports.map((support) => support?.groundY));
+  const targetRootX = median(roots.map((root) => root?.x));
+  const targetRootZ = median(roots.map((root) => root?.z));
+  const targetBodyHeight = median(
+    supports.map((support, index) => {
+      if (!support || !heads[index]) return null;
+      return support.groundY - heads[index].y;
+    }),
+  );
+
+  const stabilized = supportSmoothed.map((landmarks, index) => {
+    if (!landmarks) return null;
+    const support = supports[index];
+    const head = heads[index];
+    const root = roots[index];
+    if (
+      !support ||
+      !head ||
+      !root ||
+      targetGroundY === null ||
+      targetBodyHeight === null ||
+      targetRootX === null ||
+      targetRootZ === null
+    ) {
+      return cloneLandmarks(landmarks);
+    }
+
+    const currentBodyHeight = support.groundY - head.y;
+    const scale = currentBodyHeight
+      ? clamp(1 + ((targetBodyHeight / currentBodyHeight) - 1) * 0.2, 0.985, 1.015)
+      : 1;
+
+    return landmarks.map((point) => [
+      targetRootX + (point[0] - root.x) * scale,
+      targetGroundY + (point[1] - support.groundY) * scale,
+      targetRootZ + (point[2] - root.z) * scale,
+      point[3] ?? 1,
+    ]);
+  });
+
+  const footAnchors = buildJointAnchors(stabilized, Object.keys(FOOT_LOCK_BLEND));
+  const footLocked = stabilized.map((landmarks) => {
+    if (!landmarks) return null;
+    const next = cloneLandmarks(landmarks);
+
+    Object.entries(FOOT_LOCK_BLEND).forEach(([name, amount]) => {
+      const index = getLandmarkIndex(name);
+      const anchor = footAnchors[name];
+      if (!Number.isInteger(index) || !anchor || !next[index]) return;
+      next[index][0] = next[index][0] + (anchor.x - next[index][0]) * amount;
+      next[index][1] = next[index][1] + (anchor.y - next[index][1]) * amount;
+      next[index][2] = next[index][2] + (anchor.z - next[index][2]) * amount;
+    });
+
+    return next;
+  });
+
+  const supportLocked = smoothSequence(footLocked, 0.12, jointIndices);
+  const finalTrack = smoothSequence(supportLocked, 0.48);
+  return finalTrack;
 }
 
 function buildTimeline() {
@@ -292,11 +540,10 @@ function resizeAvatarCanvas() {
 
 function transformPoint(rawPoint) {
   const x = rawPoint[0] || 0;
-  const y = (rawPoint[1] || 0) - 0.18;
+  const y = (rawPoint[1] || 0) - 0.17;
   const z = rawPoint[2] || 0;
-
-  const yaw = 0.18;
-  const tilt = -0.12;
+  const yaw = 0.06;
+  const tilt = -0.04;
 
   const cosY = Math.cos(yaw);
   const sinY = Math.sin(yaw);
@@ -313,114 +560,146 @@ function transformPoint(rawPoint) {
 
 function projectPoint(point, width, height) {
   const cameraZ = 5.2;
-  const scale = 4.1 / (cameraZ - point.z);
+  const scale = 4.05 / (cameraZ - point.z);
   return {
     x: width * 0.5 + point.x * width * 0.17 * scale,
-    y: height * 0.49 + point.y * height * 0.23 * scale,
-    depth: point.z,
+    y: height * 0.5 + point.y * height * 0.23 * scale,
   };
 }
 
-function buildProjectedLandmarks(landmarks, width, height) {
+function normalizeProjectedPoints(projected, width, height) {
+  const pick = (name) => {
+    const index = getLandmarkIndex(name);
+    return Number.isInteger(index) ? projected[index] : null;
+  };
+
+  const supportPoints = [
+    pick("left_ankle"),
+    pick("right_ankle"),
+    pick("left_heel"),
+    pick("right_heel"),
+    pick("left_foot_index"),
+    pick("right_foot_index"),
+  ].filter(Boolean);
+  const shoulderMid = averagePoints([pick("left_shoulder"), pick("right_shoulder")]);
+  const hipMid = averagePoints([pick("left_hip"), pick("right_hip")]);
+  const facePoints = FACE_JOINT_NAMES.map(pick).filter(Boolean);
+
+  if (!supportPoints.length || !shoulderMid || !hipMid) {
+    return projected;
+  }
+
+  const torsoLength = vecLength(vecSub(hipMid, shoulderMid));
+  const groundY = Math.max(...supportPoints.map((point) => point.y));
+  const topY = facePoints.length
+    ? Math.min(...facePoints.map((point) => point.y))
+    : shoulderMid.y - torsoLength * 0.8;
+  const bodyHeight = Math.max(groundY - topY, 1);
+  const centerX = (shoulderMid.x + hipMid.x) * 0.5;
+  const targetHeight = height * 0.72;
+  const targetGroundY = height * 0.86;
+  const targetCenterX = width * 0.5;
+  const scale = clamp(targetHeight / bodyHeight, 1.15, 5.4);
+
+  return projected.map((point) => ({
+    x: (point.x - centerX) * scale + targetCenterX,
+    y: (point.y - groundY) * scale + targetGroundY,
+  }));
+}
+
+function buildProjectedFrame(landmarks, width, height) {
   if (!Array.isArray(landmarks) || !landmarks.length) return null;
-  return landmarks.map((point) => projectPoint(transformPoint(point), width, height));
-}
+  const projected = normalizeProjectedPoints(
+    landmarks.map((point) => projectPoint(transformPoint(point), width, height)),
+    width,
+    height,
+  );
 
-function getProjectedPoint(projected, name) {
-  const index = getLandmarkIndex(name);
-  return Number.isInteger(index) ? projected[index] : null;
-}
+  const pick = (name) => {
+    const index = getLandmarkIndex(name);
+    return Number.isInteger(index) ? projected[index] : null;
+  };
 
-function buildAdultRig(landmarks, width, height) {
-  const projected = buildProjectedLandmarks(landmarks, width, height);
-  if (!projected) return null;
+  const leftShoulder = pick("left_shoulder");
+  const rightShoulder = pick("right_shoulder");
+  const leftHip = pick("left_hip");
+  const rightHip = pick("right_hip");
+  const leftElbow = pick("left_elbow");
+  const rightElbow = pick("right_elbow");
+  const leftWrist = pick("left_wrist");
+  const rightWrist = pick("right_wrist");
+  const leftKnee = pick("left_knee");
+  const rightKnee = pick("right_knee");
+  const leftAnkle = pick("left_ankle");
+  const rightAnkle = pick("right_ankle");
+  const leftFoot = pick("left_foot_index");
+  const rightFoot = pick("right_foot_index");
 
-  const leftShoulderRaw = getProjectedPoint(projected, "left_shoulder");
-  const rightShoulderRaw = getProjectedPoint(projected, "right_shoulder");
-  const leftHipRaw = getProjectedPoint(projected, "left_hip");
-  const rightHipRaw = getProjectedPoint(projected, "right_hip");
-  const shoulderMidRaw = averagePoints([leftShoulderRaw, rightShoulderRaw]);
-  const hipMidRaw = averagePoints([leftHipRaw, rightHipRaw]);
-  const ankleMidRaw = averagePoints([getProjectedPoint(projected, "left_ankle"), getProjectedPoint(projected, "right_ankle")]);
-  const faceMidRaw = averagePoints([
-    getProjectedPoint(projected, "nose"),
-    getProjectedPoint(projected, "left_eye"),
-    getProjectedPoint(projected, "right_eye"),
-    getProjectedPoint(projected, "left_ear"),
-    getProjectedPoint(projected, "right_ear"),
+  const shoulderMid = averagePoints([leftShoulder, rightShoulder]);
+  const hipMid = averagePoints([leftHip, rightHip]);
+  const supportMid = averagePoints([
+    leftAnkle,
+    rightAnkle,
+    pick("left_heel"),
+    pick("right_heel"),
+    leftFoot,
+    rightFoot,
   ]);
+  const faceMid = averagePoints(FACE_JOINT_NAMES.map(pick).filter(Boolean));
+  if (!shoulderMid || !hipMid || !supportMid) return null;
 
-  if (!shoulderMidRaw || !hipMidRaw || !ankleMidRaw) return null;
-
-  const torsoAxis = vecNormalize(vecSub(hipMidRaw, shoulderMidRaw), { x: 0, y: 1 });
-  let lateralAxis = vecNormalize(vecSub(rightShoulderRaw || shoulderMidRaw, leftShoulderRaw || shoulderMidRaw), vecPerp(torsoAxis));
+  const torsoAxis = vecNormalize(vecSub(hipMid, shoulderMid), { x: 0, y: 1 });
+  let lateralAxis = vecNormalize(vecSub(rightShoulder || shoulderMid, leftShoulder || shoulderMid), vecPerp(torsoAxis));
   if (Math.abs(vecDot(torsoAxis, lateralAxis)) > 0.45) {
     lateralAxis = vecNormalize(vecPerp(torsoAxis), { x: 1, y: 0 });
   }
 
-  const rawHeight = clamp(
-    ankleMidRaw.y - ((faceMidRaw && faceMidRaw.y) || shoulderMidRaw.y - height * 0.08),
-    height * 0.42,
-    height * 0.82,
+  const bodyHeight = clamp(
+    supportMid.y - ((faceMid && faceMid.y) || shoulderMid.y - height * 0.08),
+    height * 0.54,
+    height * 0.76,
   );
-  const headUnit = rawHeight / 8;
+  const headUnit = clamp(bodyHeight / 8.4, height * 0.035, height * 0.08);
+  const measuredShoulderHalf = vecLength(vecSub(rightShoulder || shoulderMid, leftShoulder || shoulderMid)) * 0.5;
+  const measuredHipHalf = vecLength(vecSub(rightHip || hipMid, leftHip || hipMid)) * 0.5;
+  const shoulderHalf = clamp(measuredShoulderHalf * 0.94, headUnit * 0.64, headUnit * 1.16);
+  const hipHalf = clamp(measuredHipHalf * 0.98, headUnit * 0.4, headUnit * 0.88);
 
-  const rig = {
+  const torso = {
+    leftShoulder: vecAdd(shoulderMid, vecScale(lateralAxis, -shoulderHalf)),
+    rightShoulder: vecAdd(shoulderMid, vecScale(lateralAxis, shoulderHalf)),
+    leftHip: vecAdd(hipMid, vecScale(lateralAxis, -hipHalf)),
+    rightHip: vecAdd(hipMid, vecScale(lateralAxis, hipHalf)),
+  };
+  torso.chestLeft = vecLerp(torso.leftShoulder, torso.leftHip, 0.24);
+  torso.chestRight = vecLerp(torso.rightShoulder, torso.rightHip, 0.24);
+  torso.waistLeft = vecLerp(torso.leftShoulder, torso.leftHip, 0.72);
+  torso.waistRight = vecLerp(torso.rightShoulder, torso.rightHip, 0.72);
+  torso.neck = shoulderMid;
+  torso.sternum = vecLerp(shoulderMid, hipMid, 0.28);
+  torso.headCenter = faceMid ? vecAdd(faceMid, vecScale(torsoAxis, -headUnit * 0.06)) : vecAdd(shoulderMid, vecScale(torsoAxis, -headUnit * 1.0));
+
+  return {
     headUnit,
-    neck: shoulderMidRaw,
-    pelvis: vecAdd(shoulderMidRaw, vecScale(torsoAxis, headUnit * 2.55)),
+    torsoAxis,
+    torso,
+    joints: {
+      leftShoulder: torso.leftShoulder,
+      rightShoulder: torso.rightShoulder,
+      leftElbow,
+      rightElbow,
+      leftWrist,
+      rightWrist,
+      leftHip: torso.leftHip,
+      rightHip: torso.rightHip,
+      leftKnee,
+      rightKnee,
+      leftAnkle,
+      rightAnkle,
+      leftFoot,
+      rightFoot,
+    },
   };
-
-  rig.leftShoulder = vecAdd(rig.neck, vecScale(lateralAxis, -headUnit * 0.92));
-  rig.rightShoulder = vecAdd(rig.neck, vecScale(lateralAxis, headUnit * 0.92));
-  rig.leftHip = vecAdd(rig.pelvis, vecScale(lateralAxis, -headUnit * 0.58));
-  rig.rightHip = vecAdd(rig.pelvis, vecScale(lateralAxis, headUnit * 0.58));
-  rig.sternum = vecAdd(rig.neck, vecScale(torsoAxis, headUnit * 0.76));
-  rig.waist = vecAdd(rig.neck, vecScale(torsoAxis, headUnit * 1.78));
-  rig.headCenter = vecAdd(rig.neck, vecScale(torsoAxis, -headUnit * 1.02));
-
-  const lengths = {
-    upperArm: headUnit * 1.45,
-    forearm: headUnit * 1.38,
-    thigh: headUnit * 1.95,
-    shin: headUnit * 2.02,
-    foot: headUnit * 0.86,
-  };
-
-  function point(name) {
-    return getProjectedPoint(projected, name);
-  }
-
-  function direction(fromName, toName, fallback) {
-    const from = point(fromName);
-    const to = point(toName);
-    if (!from || !to) return fallback;
-    return vecNormalize(vecSub(to, from), fallback);
-  }
-
-  const leftUpperArmDir = direction("left_shoulder", "left_elbow", vecNormalize(vecAdd(vecScale(lateralAxis, -1), vecScale(torsoAxis, 0.12))));
-  const rightUpperArmDir = direction("right_shoulder", "right_elbow", vecNormalize(vecAdd(vecScale(lateralAxis, 1), vecScale(torsoAxis, 0.12))));
-  const leftForearmDir = direction("left_elbow", "left_wrist", leftUpperArmDir);
-  const rightForearmDir = direction("right_elbow", "right_wrist", rightUpperArmDir);
-  const leftThighDir = direction("left_hip", "left_knee", vecNormalize(vecAdd(vecScale(lateralAxis, -0.12), vecScale(torsoAxis, 1))));
-  const rightThighDir = direction("right_hip", "right_knee", vecNormalize(vecAdd(vecScale(lateralAxis, 0.12), vecScale(torsoAxis, 1))));
-  const leftShinDir = direction("left_knee", "left_ankle", leftThighDir);
-  const rightShinDir = direction("right_knee", "right_ankle", rightThighDir);
-  const leftFootDir = direction("left_ankle", "left_foot_index", vecNormalize(vecAdd(vecScale(lateralAxis, -0.18), vecScale(torsoAxis, 0.08)), { x: 1, y: 0 }));
-  const rightFootDir = direction("right_ankle", "right_foot_index", vecNormalize(vecAdd(vecScale(lateralAxis, 0.18), vecScale(torsoAxis, 0.08)), { x: 1, y: 0 }));
-
-  rig.leftElbow = vecAdd(rig.leftShoulder, vecScale(leftUpperArmDir, lengths.upperArm));
-  rig.rightElbow = vecAdd(rig.rightShoulder, vecScale(rightUpperArmDir, lengths.upperArm));
-  rig.leftWrist = vecAdd(rig.leftElbow, vecScale(leftForearmDir, lengths.forearm));
-  rig.rightWrist = vecAdd(rig.rightElbow, vecScale(rightForearmDir, lengths.forearm));
-  rig.leftKnee = vecAdd(rig.leftHip, vecScale(leftThighDir, lengths.thigh));
-  rig.rightKnee = vecAdd(rig.rightHip, vecScale(rightThighDir, lengths.thigh));
-  rig.leftAnkle = vecAdd(rig.leftKnee, vecScale(leftShinDir, lengths.shin));
-  rig.rightAnkle = vecAdd(rig.rightKnee, vecScale(rightShinDir, lengths.shin));
-  rig.leftFoot = vecAdd(rig.leftAnkle, vecScale(leftFootDir, lengths.foot));
-  rig.rightFoot = vecAdd(rig.rightAnkle, vecScale(rightFootDir, lengths.foot));
-
-  return rig;
 }
 
 function drawBackdrop(ctx, width, height) {
@@ -524,60 +803,45 @@ function drawPolygon(ctx, points, palette, isHot) {
   ctx.restore();
 }
 
-function drawAdultFigure(ctx, rig, hotNames, palette, isGhost = false) {
-  if (!rig) return;
+function drawAdultFigure(ctx, frameData, hotNames, palette, isGhost = false) {
+  if (!frameData) return;
 
   const blinkOn = !isGhost && state.avatar ? state.avatar.blinkVisible : true;
   const isHot = (...names) => blinkOn && names.some((name) => hotNames.has(name));
-  const head = rig.headUnit;
-
-  const chestLeft = vecLerp(rig.leftShoulder, rig.leftHip, 0.24);
-  const chestRight = vecLerp(rig.rightShoulder, rig.rightHip, 0.24);
-  const waistLeft = vecLerp(rig.leftShoulder, rig.leftHip, 0.72);
-  const waistRight = vecLerp(rig.rightShoulder, rig.rightHip, 0.72);
+  const head = frameData.headUnit;
+  const torso = frameData.torso;
+  const joints = frameData.joints;
 
   ctx.save();
   if (isGhost) {
     ctx.globalAlpha = 0.88;
   }
 
-  drawPolygon(
-    ctx,
-    [rig.leftShoulder, rig.rightShoulder, chestRight, chestLeft],
-    palette,
-    isHot("left_shoulder", "right_shoulder"),
-  );
-  drawPolygon(
-    ctx,
-    [chestLeft, chestRight, waistRight, rig.pelvis, waistLeft],
-    palette,
-    isHot("left_shoulder", "right_shoulder", "left_hip", "right_hip"),
-  );
-  drawPolygon(ctx, [waistLeft, waistRight, rig.rightHip, rig.leftHip], palette, isHot("left_hip", "right_hip"));
+  drawPolygon(ctx, [torso.leftShoulder, torso.rightShoulder, torso.chestRight, torso.chestLeft], palette, false);
+  drawPolygon(ctx, [torso.chestLeft, torso.chestRight, torso.waistRight, torso.rightHip, torso.leftHip, torso.waistLeft], palette, false);
 
-  drawCapsule(ctx, rig.leftShoulder, rig.leftElbow, head * 0.34, palette, isHot("left_shoulder", "left_elbow"));
-  drawCapsule(ctx, rig.leftElbow, rig.leftWrist, head * 0.28, palette, isHot("left_elbow", "left_wrist"));
-  drawCapsule(ctx, rig.rightShoulder, rig.rightElbow, head * 0.34, palette, isHot("right_shoulder", "right_elbow"));
-  drawCapsule(ctx, rig.rightElbow, rig.rightWrist, head * 0.28, palette, isHot("right_elbow", "right_wrist"));
-  drawCapsule(ctx, rig.leftHip, rig.leftKnee, head * 0.46, palette, isHot("left_hip", "left_knee"));
-  drawCapsule(ctx, rig.leftKnee, rig.leftAnkle, head * 0.36, palette, isHot("left_knee", "left_ankle"));
-  drawCapsule(ctx, rig.rightHip, rig.rightKnee, head * 0.46, palette, isHot("right_hip", "right_knee"));
-  drawCapsule(ctx, rig.rightKnee, rig.rightAnkle, head * 0.36, palette, isHot("right_knee", "right_ankle"));
-  drawCapsule(ctx, rig.leftAnkle, rig.leftFoot, head * 0.18, palette, isHot("left_ankle", "left_foot_index", "left_heel"));
-  drawCapsule(ctx, rig.rightAnkle, rig.rightFoot, head * 0.18, palette, isHot("right_ankle", "right_foot_index", "right_heel"));
-  drawCapsule(ctx, rig.neck, rig.sternum, head * 0.18, palette, isHot("left_shoulder", "right_shoulder"));
+  drawCapsule(ctx, joints.leftShoulder, joints.leftElbow, head * 0.33, palette, isHot("left_shoulder", "left_elbow"));
+  drawCapsule(ctx, joints.leftElbow, joints.leftWrist, head * 0.27, palette, isHot("left_elbow", "left_wrist"));
+  drawCapsule(ctx, joints.rightShoulder, joints.rightElbow, head * 0.33, palette, isHot("right_shoulder", "right_elbow"));
+  drawCapsule(ctx, joints.rightElbow, joints.rightWrist, head * 0.27, palette, isHot("right_elbow", "right_wrist"));
+  drawCapsule(ctx, joints.leftHip, joints.leftKnee, head * 0.46, palette, isHot("left_hip", "left_knee"));
+  drawCapsule(ctx, joints.leftKnee, joints.leftAnkle, head * 0.36, palette, isHot("left_knee", "left_ankle"));
+  drawCapsule(ctx, joints.rightHip, joints.rightKnee, head * 0.46, palette, isHot("right_hip", "right_knee"));
+  drawCapsule(ctx, joints.rightKnee, joints.rightAnkle, head * 0.36, palette, isHot("right_knee", "right_ankle"));
+  drawCapsule(ctx, joints.leftAnkle, joints.leftFoot, head * 0.17, palette, isHot("left_ankle", "left_heel", "left_foot_index"));
+  drawCapsule(ctx, joints.rightAnkle, joints.rightFoot, head * 0.17, palette, isHot("right_ankle", "right_heel", "right_foot_index"));
+  drawCapsule(ctx, torso.neck, torso.sternum, head * 0.16, palette, false);
 
-  const headHot = isHot("left_shoulder", "right_shoulder");
   drawPolygon(
     ctx,
     [
-      { x: rig.headCenter.x - head * 0.34, y: rig.headCenter.y - head * 0.15 },
-      { x: rig.headCenter.x + head * 0.34, y: rig.headCenter.y - head * 0.15 },
-      { x: rig.headCenter.x + head * 0.28, y: rig.headCenter.y + head * 0.55 },
-      { x: rig.headCenter.x - head * 0.28, y: rig.headCenter.y + head * 0.55 },
+      { x: torso.headCenter.x - head * 0.33, y: torso.headCenter.y - head * 0.2 },
+      { x: torso.headCenter.x + head * 0.33, y: torso.headCenter.y - head * 0.2 },
+      { x: torso.headCenter.x + head * 0.29, y: torso.headCenter.y + head * 0.56 },
+      { x: torso.headCenter.x - head * 0.29, y: torso.headCenter.y + head * 0.56 },
     ],
     palette,
-    headHot,
+    false,
   );
 
   ctx.restore();
@@ -594,26 +858,27 @@ function renderAvatar() {
 
   drawBackdrop(ctx, width, height);
 
-  const referenceRig = buildAdultRig(state.avatar.referenceLandmarks, width, height);
-  const wrongRig = buildAdultRig(state.avatar.wrongLandmarks, width, height);
+  const referenceFrame = buildProjectedFrame(state.avatar.referenceLandmarks, width, height);
+  const wrongFrame = buildProjectedFrame(state.avatar.wrongLandmarks, width, height);
 
-  drawAdultFigure(ctx, referenceRig, new Set(), avatarPalette.reference, true);
-  drawAdultFigure(ctx, wrongRig, state.avatar.hotNames || new Set(), avatarPalette.live, false);
+  drawAdultFigure(ctx, referenceFrame, new Set(), avatarPalette.reference, true);
+  drawAdultFigure(ctx, wrongFrame, state.avatar.hotNames || new Set(), avatarPalette.live, false);
 
   ctx.fillStyle = "rgba(245, 246, 247, 0.88)";
   ctx.font = `${Math.max(12, Math.round(height * 0.03))}px "Space Grotesk", sans-serif`;
-  ctx.fillText("8-head mannequin", width * 0.06, height * 0.08);
+  ctx.fillText("stabilized adult mannequin", width * 0.06, height * 0.08);
   ctx.fillStyle = "rgba(155, 167, 179, 0.88)";
   ctx.font = `${Math.max(11, Math.round(height * 0.022))}px "Pretendard", sans-serif`;
   ctx.fillText("white = wrong, blue ghost = correct", width * 0.06, height * 0.13);
 }
 
-function initAvatar() {
+function initAvatar(avatarTracks) {
   const canvas = ensureAvatarCanvas();
   const ctx = canvas.getContext("2d");
   state.avatar = {
     canvas,
     ctx,
+    tracks: avatarTracks,
     wrongLandmarks: null,
     referenceLandmarks: null,
     hotNames: new Set(),
@@ -675,13 +940,14 @@ function updateFrame(frame) {
   const displayedScore = getDisplayedScore(frame);
   const topIssue = (frame.issues || [])[0] || null;
   const warningIssue = topIssue && displayedScore <= WARNING_SCORE_THRESHOLD ? topIssue : null;
+  const currentIndex = state.player.index;
 
   elements.scoreValue.textContent = `${Math.round(displayedScore)}`;
   elements.currentIssue.textContent = warningIssue ? warningIssue.label : "기준 자세 범위";
   elements.phaseLabel.textContent = `Rep ${frame.rep_index} · ${frame.phase}`;
   elements.coachText.textContent = warningIssue
     ? frame.coach_text
-    : "현재 1초 평균 점수 기준으로는 경고 임계값 아래로 떨어지지 않았습니다.";
+    : "아바타는 발 접지 기준과 시간축 스무딩을 적용한 안정화 모션으로 표시 중입니다.";
 
   renderMetrics(frame);
 
@@ -693,8 +959,8 @@ function updateFrame(frame) {
 
   const hotNames = warningIssue ? getHotJointNames(warningIssue.id) : new Set();
   if (state.avatar) {
-    state.avatar.wrongLandmarks = frame.wrong.world_landmarks;
-    state.avatar.referenceLandmarks = frame.reference.world_landmarks;
+    state.avatar.wrongLandmarks = state.avatar.tracks.wrong[currentIndex] || frame.wrong.world_landmarks;
+    state.avatar.referenceLandmarks = state.avatar.tracks.reference[currentIndex] || frame.reference.world_landmarks;
     state.avatar.hotNames = hotNames;
     renderAvatar();
   }
@@ -766,14 +1032,19 @@ async function bootstrap() {
   state.scoreBuckets = buildScoreBuckets(state.data.frames);
   state.player.fps = state.data.input_videos.wrong.sampled_fps || 10;
 
+  const avatarTracks = {
+    wrong: prepareAvatarTrack("wrong"),
+    reference: prepareAvatarTrack("reference"),
+  };
+
   elements.averageScore.textContent = `${Math.round(state.data.overview.average_score)}`;
   elements.repCount.textContent = `${state.data.overview.rep_count}`;
   elements.thresholdValue.textContent = `${WARNING_SCORE_THRESHOLD}`;
-  elements.summaryText.textContent = `1초 평균 점수 기준으로 주요 이탈은 ${state.data.overview.top_findings.map((item) => item.label).join(" / ")} 입니다.`;
+  elements.summaryText.textContent = `1초 평균 점수와 접지 안정화를 기준으로 아바타 모션을 보정했습니다.`;
 
   buildTimeline();
   renderFindings();
-  initAvatar();
+  initAvatar(avatarTracks);
   bindControls();
   showFrame(0);
 }
