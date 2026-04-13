@@ -1,0 +1,7 @@
+.venv/
+.tools/
+.models/
+.scratch/
+__pycache__/
+*.pyc
+python-installer.exe

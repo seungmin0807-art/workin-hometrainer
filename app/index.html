@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workin Home Trainer Prototype</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="workspace">
+      <div class="workspace-head">
+        <p class="eyebrow">Single Camera Squat Correction</p>
+        <div class="workspace-title">
+          <h1 id="headline">Loading prototype...</h1>
+          <p id="summary">MediaPipe Pose 분석 데이터를 불러오는 중입니다.</p>
+        </div>
+      </div>
+
+      <div class="video-stage">
+        <video id="overlayVideo" playsinline preload="auto"></video>
+        <div class="video-overlay">
+          <div class="video-badge">
+            <span class="badge-label">Current cue</span>
+            <strong id="currentIssue">기준 자세와 비교 중</strong>
+          </div>
+          <div class="score-pill">
+            <span>Pose score</span>
+            <strong id="scoreValue">--</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="workspace-footer">
+        <div class="controls">
+          <button id="playToggle" class="action">재생</button>
+          <button id="voiceToggle" class="ghost">음성 피드백 끔</button>
+          <span id="phaseLabel" class="phase-label">Rep 1 · steady</span>
+        </div>
+        <div id="timeline" class="timeline" aria-label="Issue timeline"></div>
+      </div>
+    </section>
+
+    <aside class="inspector">
+      <div class="inspector-top">
+        <div>
+          <p class="eyebrow">AI Coach Panel</p>
+          <h2>Pose Twin</h2>
+        </div>
+        <div class="top-metrics">
+          <div>
+            <span>Average</span>
+            <strong id="averageScore">--</strong>
+          </div>
+          <div>
+            <span>Reps</span>
+            <strong id="repCount">--</strong>
+          </div>
+        </div>
+      </div>
+
+      <section class="avatar-panel">
+        <div class="panel-head">
+          <div>
+            <span class="panel-kicker">3D avatar</span>
+            <h3>Wrong vs Reference Skeleton</h3>
+          </div>
+          <p class="legend">
+            <span class="legend-dot live"></span> wrong
+            <span class="legend-dot ref"></span> correct
+          </p>
+        </div>
+        <div id="avatarViewport" class="avatar-viewport"></div>
+      </section>
+
+      <section class="coach-panel">
+        <div class="panel-head">
+          <div>
+            <span class="panel-kicker">Live coaching</span>
+            <h3>Frame Note</h3>
+          </div>
+        </div>
+        <p id="coachText" class="coach-copy">분석 결과를 준비 중입니다.</p>
+      </section>
+
+      <section class="metrics-panel">
+        <div class="panel-head">
+          <div>
+            <span class="panel-kicker">Comparison</span>
+            <h3>Current Frame Metrics</h3>
+          </div>
+        </div>
+        <div id="metricGrid" class="metric-grid"></div>
+      </section>
+
+      <section class="findings-panel">
+        <div class="panel-head">
+          <div>
+            <span class="panel-kicker">Top findings</span>
+            <h3>Where the squat drifts</h3>
+          </div>
+        </div>
+        <div id="findingList" class="finding-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
+
