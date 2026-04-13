@@ -1,4 +1,4 @@
-import * as THREE from "https://unpkg.com/three@0.176.0/build/three.module.js";
+import * as THREE from "./vendor/three.module.js";
 
 const state = {
   data: null,
@@ -7,12 +7,18 @@ const state = {
   lastSpokenText: "",
   lastSpokenAt: 0,
   avatar: null,
+  player: {
+    isPlaying: false,
+    timerId: null,
+    index: 0,
+    fps: 10,
+  },
 };
 
 const elements = {
   headline: document.getElementById("headline"),
   summary: document.getElementById("summary"),
-  overlayVideo: document.getElementById("overlayVideo"),
+  overlayFrame: document.getElementById("overlayFrame"),
   currentIssue: document.getElementById("currentIssue"),
   scoreValue: document.getElementById("scoreValue"),
   playToggle: document.getElementById("playToggle"),
@@ -38,10 +44,11 @@ function fmt(value, digits = 1, suffix = "") {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
 }
 
-function findNearestFrame(timeSec) {
+function findNearestFrameIndex(timeSec) {
   const frames = state.data.frames;
   let low = 0;
   let high = frames.length - 1;
+
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     if (frames[mid].time_sec < timeSec) {
@@ -50,11 +57,16 @@ function findNearestFrame(timeSec) {
       high = mid - 1;
     }
   }
-  const candidates = [frames[Math.max(0, high)], frames[Math.min(frames.length - 1, low)]].filter(Boolean);
-  return candidates.reduce((best, item) => {
-    if (!best) return item;
-    return Math.abs(item.time_sec - timeSec) < Math.abs(best.time_sec - timeSec) ? item : best;
-  }, null);
+
+  const a = Math.max(0, high);
+  const b = Math.min(frames.length - 1, low);
+  return Math.abs(frames[a].time_sec - timeSec) <= Math.abs(frames[b].time_sec - timeSec) ? a : b;
+}
+
+function getFramePath(index) {
+  const media = state.data.media;
+  const padded = String(index).padStart(4, "0");
+  return `${media.overlay_frame_dir}/${media.overlay_frame_pattern.replace("{index:04d}", padded)}`;
 }
 
 function buildTimeline() {
@@ -73,8 +85,8 @@ function buildTimeline() {
     node.style.width = `${Math.max(((segment.end_time - segment.start_time + 0.1) / duration) * 100, 0.6)}%`;
     node.title = `${segment.label} · ${segment.start_time.toFixed(1)}s`;
     node.addEventListener("click", () => {
-      elements.overlayVideo.currentTime = segment.start_time;
-      elements.overlayVideo.play();
+      seekToTime(segment.start_time);
+      play();
     });
     elements.timeline.appendChild(node);
   });
@@ -92,14 +104,15 @@ function renderFindings() {
     const node = document.createElement("button");
     node.type = "button";
     node.className = "finding-item";
+    const suffix = item.id === "depth" ? "" : "°";
     node.innerHTML = `
       <strong>${item.label}</strong>
-      <p>평균 이탈 ${fmt(item.avg_delta, 1, item.id === "depth" ? "" : "°")} · 최대 ${fmt(item.peak_delta, 1, item.id === "depth" ? "" : "°")} · ${item.frame_hits} sampled frames</p>
+      <p>평균 이탈 ${fmt(item.avg_delta, 1, suffix)} · 최대 ${fmt(item.peak_delta, 1, suffix)} · ${item.frame_hits} sampled frames</p>
     `;
     node.addEventListener("click", () => {
       if (segment) {
-        elements.overlayVideo.currentTime = segment.start_time;
-        elements.overlayVideo.play();
+        seekToTime(segment.start_time);
+        play();
       }
     });
     elements.findingList.appendChild(node);
@@ -171,7 +184,7 @@ function createRig(colorHex, opacity = 1, radius = 0.032) {
     boneMeshes.push(mesh);
   });
 
-  return { group, jointMeshes, boneMeshes, radius };
+  return { group, jointMeshes, boneMeshes };
 }
 
 function toWorldVectors(landmarks) {
@@ -184,6 +197,7 @@ function applyRigFrame(rig, landmarks, highlightIndices = new Set()) {
     rig.group.visible = false;
     return;
   }
+
   rig.group.visible = true;
   const points = toWorldVectors(landmarks);
   const up = new THREE.Vector3(0, 1, 0);
@@ -193,12 +207,11 @@ function applyRigFrame(rig, landmarks, highlightIndices = new Set()) {
     mesh.position.copy(point);
     const isHot = highlightIndices.has(index);
     mesh.scale.setScalar(isHot ? 1.45 : 1);
-    if (mesh.material.emissiveIntensity !== undefined) {
-      mesh.material.emissiveIntensity = isHot ? 0.8 : 0.35;
-      mesh.material.color.setHex(isHot ? 0xff574d : mesh.material.color.getHex());
-      if (!isHot) {
-        mesh.material.color.setHex(mesh.material.opacity < 1 ? 0xffd04f : 0x52dfff);
-      }
+    mesh.material.emissiveIntensity = isHot ? 0.8 : 0.35;
+    if (mesh.material.opacity < 1) {
+      mesh.material.color.setHex(0xffd04f);
+    } else {
+      mesh.material.color.setHex(isHot ? 0xff574d : 0x52dfff);
     }
   });
 
@@ -219,6 +232,7 @@ function applyRigFrame(rig, landmarks, highlightIndices = new Set()) {
 function initAvatar() {
   const width = elements.avatarViewport.clientWidth;
   const height = elements.avatarViewport.clientHeight;
+
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 100);
   camera.position.set(1.8, 1.5, 4.8);
@@ -230,6 +244,7 @@ function initAvatar() {
   elements.avatarViewport.appendChild(renderer.domElement);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+
   const key = new THREE.DirectionalLight(0x84e4ff, 1.05);
   key.position.set(3, 6, 5);
   scene.add(key);
@@ -285,6 +300,7 @@ function maybeSpeak(text) {
 function updateFrame(frame) {
   if (!frame) return;
   state.currentFrame = frame;
+
   const issue = frame.issues[0];
   elements.currentIssue.textContent = issue ? issue.label : "기준 자세와 거의 동일";
   elements.scoreValue.textContent = `${Math.round(frame.score)}`;
@@ -300,21 +316,63 @@ function updateFrame(frame) {
   }
 
   const side = state.data.input_videos.wrong.primary_side;
-  const jointSet = new Set(frame.highlighted_joint_names.map((name) => state.data.landmark_index[`${side}_${name}`]));
-  applyRigFrame(state.avatar.wrongRig, frame.wrong.world_landmarks, jointSet);
-  applyRigFrame(state.avatar.refRig, frame.reference.world_landmarks);
+  const highlighted = new Set(
+    frame.highlighted_joint_names
+      .map((name) => state.data.landmark_index[`${side}_${name}`])
+      .filter((value) => Number.isInteger(value)),
+  );
 
+  applyRigFrame(state.avatar.wrongRig, frame.wrong.world_landmarks, highlighted);
+  applyRigFrame(state.avatar.refRig, frame.reference.world_landmarks);
   maybeSpeak(frame.coach_text);
 }
 
-function bindVideo() {
-  elements.playToggle.addEventListener("click", async () => {
-    if (elements.overlayVideo.paused) {
-      await elements.overlayVideo.play();
-      elements.playToggle.textContent = "일시정지";
+function showFrame(index, shouldSpeak = true) {
+  const clamped = Math.max(0, Math.min(index, state.data.frames.length - 1));
+  state.player.index = clamped;
+  elements.overlayFrame.src = getFramePath(clamped);
+  updateFrame(state.data.frames[clamped]);
+  if (!shouldSpeak) {
+    state.lastSpokenText = "";
+    state.lastSpokenAt = 0;
+  }
+}
+
+function pause() {
+  if (state.player.timerId) {
+    clearInterval(state.player.timerId);
+    state.player.timerId = null;
+  }
+  state.player.isPlaying = false;
+  elements.playToggle.textContent = "재생";
+}
+
+function play() {
+  if (state.player.isPlaying) return;
+  state.player.isPlaying = true;
+  elements.playToggle.textContent = "일시정지";
+
+  const intervalMs = 1000 / Math.max(state.player.fps, 1);
+  state.player.timerId = window.setInterval(() => {
+    if (state.player.index >= state.data.frames.length - 1) {
+      pause();
+      return;
+    }
+    showFrame(state.player.index + 1);
+  }, intervalMs);
+}
+
+function seekToTime(timeSec) {
+  const index = findNearestFrameIndex(timeSec);
+  showFrame(index, false);
+}
+
+function bindControls() {
+  elements.playToggle.addEventListener("click", () => {
+    if (state.player.isPlaying) {
+      pause();
     } else {
-      elements.overlayVideo.pause();
-      elements.playToggle.textContent = "재생";
+      play();
     }
   });
 
@@ -325,34 +383,27 @@ function bindVideo() {
       window.speechSynthesis.cancel();
     }
   });
-
-  const sync = () => updateFrame(findNearestFrame(elements.overlayVideo.currentTime));
-  elements.overlayVideo.addEventListener("timeupdate", sync);
-  elements.overlayVideo.addEventListener("seeked", sync);
-  elements.overlayVideo.addEventListener("loadeddata", sync);
-  elements.overlayVideo.addEventListener("play", () => {
-    elements.playToggle.textContent = "일시정지";
-  });
-  elements.overlayVideo.addEventListener("pause", () => {
-    elements.playToggle.textContent = "재생";
-  });
 }
 
 async function bootstrap() {
   const response = await fetch("data/analysis.json");
+  if (!response.ok) {
+    throw new Error(`Failed to load analysis.json (${response.status})`);
+  }
+
   state.data = await response.json();
+  state.player.fps = state.data.input_videos.wrong.sampled_fps || 10;
 
   elements.headline.textContent = state.data.overview.headline;
   elements.summary.textContent = state.data.overview.summary;
   elements.averageScore.textContent = `${Math.round(state.data.overview.average_score)}`;
   elements.repCount.textContent = `${state.data.overview.rep_count}`;
-  elements.overlayVideo.src = state.data.media.overlay_video;
 
   buildTimeline();
   renderFindings();
   initAvatar();
-  bindVideo();
-  updateFrame(state.data.frames[0]);
+  bindControls();
+  showFrame(0, false);
 }
 
 bootstrap().catch((error) => {

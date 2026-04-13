@@ -807,9 +807,10 @@ def render_overlay_video(
     wrong_video_path: Path,
     comparison: dict[str, Any],
     output_path: Path,
+    frame_dir: Path,
     side: str,
     sampled_fps: float,
-) -> None:
+) -> dict[str, Any]:
     cap = cv2.VideoCapture(str(wrong_video_path))
     if not cap.isOpened():
         raise SystemExit(f"Could not open wrong video for overlay rendering: {wrong_video_path}")
@@ -818,11 +819,14 @@ def render_overlay_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     sample_interval = max(int(round(fps / sampled_fps)), 1) if fps else 3
+    preview_width = min(width, 720)
+    preview_height = int(height * (preview_width / max(width, 1)))
+    frame_dir.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(output_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
         sampled_fps,
-        (width, height),
+        (preview_width, preview_height),
     )
 
     frames = comparison["frames"]
@@ -849,7 +853,12 @@ def render_overlay_video(
                 highlighted,
             )
             composed = draw_hud(composed, frame_data)
-            writer.write(composed)
+            preview = composed
+            if preview_width != width:
+                preview = cv2.resize(composed, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
+            writer.write(preview)
+            frame_path = frame_dir / f"frame_{sample_idx:04d}.jpg"
+            cv2.imwrite(str(frame_path), preview, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
             sample_idx += 1
 
         frame_idx += 1
@@ -858,6 +867,14 @@ def render_overlay_video(
     progress.close()
     writer.release()
     cap.release()
+    return {
+        "overlay_video": "media/wrong_overlay.mp4",
+        "overlay_frame_dir": "media/frames",
+        "overlay_frame_pattern": "frame_{index:04d}.jpg",
+        "overlay_frame_count": len(frames),
+        "overlay_frame_width": preview_width,
+        "overlay_frame_height": preview_height,
+    }
 
 
 def build_overview(comparison: dict[str, Any], wrong: dict[str, Any]) -> dict[str, Any]:
@@ -911,7 +928,8 @@ def main() -> None:
     comparison = compare_sequences(correct, wrong, side)
 
     overlay_path = media_dir / "wrong_overlay.mp4"
-    render_overlay_video(args.wrong.resolve(), comparison, overlay_path, side, wrong["sampled_fps"])
+    frame_dir = media_dir / "frames"
+    media_payload = render_overlay_video(args.wrong.resolve(), comparison, overlay_path, frame_dir, side, wrong["sampled_fps"])
 
     payload = {
         "overview": build_overview(comparison, wrong),
@@ -923,9 +941,7 @@ def main() -> None:
         "connections": CONNECTIONS,
         "issue_segments": comparison["issue_segments"],
         "frames": comparison["frames"],
-        "media": {
-            "overlay_video": "media/wrong_overlay.mp4",
-        },
+        "media": media_payload,
     }
 
     analysis_path = data_dir / "analysis.json"

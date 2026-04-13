@@ -131,7 +131,7 @@ body {
   pointer-events: none;
 }
 
-#overlayVideo {
+#overlayFrame {
   display: block;
   width: 100%;
   height: min(72vh, 980px);
@@ -438,4 +438,3 @@ body {
     grid-template-columns: 1fr;
   }
 }
-
